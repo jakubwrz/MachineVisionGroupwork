@@ -24,9 +24,11 @@ def add_code(source_code):
         "source": [line + "\n" for line in source_code.strip().split("\n")]
     })
 
-# Cell 1: Markdown Overview
+# Cell 1: Markdown Overview with Colab Badge
 add_md("""# Machine Vision (UFMFRR-15-M) - Group Project
 ## Stage 1: Radiometric & Spatial Preprocessing (Units 2, 4, 5)
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/jakubwrz/MachineVisionGroupwork/blob/main/notebooks/Stage1_Radiometric_and_Spatial_Preprocessing.ipynb)
 
 ---
 ### 1. Assessment Overview & Engineering Objectives
@@ -478,14 +480,15 @@ print("Visualization utilities compiled.")""")
 add_md("""---
 ### 7. Task 1: Direct Integration & Processing on MinneApple Dataset
 
-Here we directly load the real MinneApple dataset downloaded via Roboflow (630 orchard images in COCO JSON format) and run Stage 1 preprocessing across real canopy conditions.""")
+This step loads your MinneApple orchard dataset (630 images, 25,440 apple annotations in COCO JSON format).
+The code below automatically locates the dataset whether it is placed in Google Colab session storage, Google Drive, or cloned repo root.""")
 
 # Cell 14: Code MinneApple Loader & Batch Processor
 add_code("""# Primary Contributor: [Name]
-# Step 7: MinneApple Dataset Indexing and Batch Preprocessing
+# Step 7: MinneApple Dataset Indexing, Batch Preprocessing & High-Res Tiling
 
 class MinneAppleDataset:
-    def __init__(self, dataset_dir="minneapple-1-1/train"):
+    def __init__(self, dataset_dir):
         self.dataset_dir = os.path.abspath(dataset_dir)
         self.annotation_path = os.path.join(self.dataset_dir, "_annotations.coco.json")
         if not os.path.exists(self.annotation_path):
@@ -518,19 +521,46 @@ class MinneAppleDataset:
         meta["apple_count"] = len(anns)
         return img_rgb, anns, meta
 
-# Load dataset if locally present
-dataset_path = "minneapple-1-1/train"
-if os.path.exists(dataset_path):
-    dataset = MinneAppleDataset(dataset_path)
+# Automatic detection of MinneApple dataset location in Colab or local environment
+candidate_paths = [
+    "minneapple-1-1/train",
+    "/content/minneapple-1-1/train",
+    "/content/MachineVisionGroupwork/minneapple-1-1/train",
+    "/content/drive/MyDrive/minneapple-1-1/train",
+    "/content/drive/MyDrive/MachineVision_Groupwork/minneapple-1-1/train",
+    "../minneapple-1-1/train",
+]
+
+found_dataset_dir = None
+for p in candidate_paths:
+    if os.path.exists(os.path.join(p, "_annotations.coco.json")):
+        found_dataset_dir = p
+        break
+
+if found_dataset_dir is not None:
+    print(f"--> Found MinneApple dataset at: {found_dataset_dir}")
+    dataset = MinneAppleDataset(found_dataset_dir)
     
-    # Process a representative sample image
+    # 1. Process sample image
     sample_img, anns, meta = dataset[0]
-    print(f"Sample: {meta['file_name']}, Apples: {meta['apple_count']}, Shape: {sample_img.shape}")
+    print(f"Image: {meta['file_name']} | Ground-truth Apples: {meta['apple_count']} | Shape: {sample_img.shape}")
     
     stage1_out = preprocess_image(sample_img, mode="apple")
     plot_stage1_diagnostics(stage1_out, title=f"Real MinneApple Image: {meta['file_name']} (Stage 1 Diagnostics)")
+
+    # 2. Demonstrate 512x512 Tiling with 20% overlap (preserves small fruit detail)
+    h, w = sample_img.shape[:2]
+    patch_size = 512
+    stride = int(patch_size * 0.8) # 20% overlap
+    tiles = []
+    for y in range(0, h - patch_size + 1, stride):
+        for x in range(0, w - patch_size + 1, stride):
+            tiles.append(sample_img[y:y+patch_size, x:x+patch_size])
+    print(f"--> Successfully extracted {len(tiles)} overlapping 512x512 patches covering the {h}x{w} canvas.")
 else:
-    print(f"Directory {dataset_path} not found. Please run download_minneapple.py to fetch the dataset.")""")
+    print("[NOTE] MinneApple dataset folder not detected in standard paths.")
+    print("If you have it in Google Drive or Colab, specify its path:")
+    print("dataset = MinneAppleDataset('/path/to/minneapple-1-1/train')")""")
 
 # Cell 15: Markdown Resistor Demo
 add_md("""---
