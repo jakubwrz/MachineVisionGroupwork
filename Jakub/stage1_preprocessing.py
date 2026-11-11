@@ -2,7 +2,7 @@
 Machine Vision (UFMFRR-15-M) - Group Project
 Stage 1: Radiometric & Spatial Preprocessing (Units 2, 4, 5)
 
-Primary Contributor: [Name]
+Primary Contributor: Jakub Wrzyszcz
 """
 
 import os
@@ -41,14 +41,24 @@ def preprocess_stage1(rgb_img, mode="apple"):
 def run_stage1():
     print("=" * 60)
     print("Machine Vision (UFMFRR-15-M) - Stage 1 Preprocessing")
+    print("Contributor: Jakub Wrzyszcz")
     print("=" * 60)
 
-    # Locate dataset
-    img_files = (
-        glob.glob("minneapple-1-1/train/*.jpg") or
-        glob.glob("/content/minneapple-1-1/train/*.jpg") or
-        glob.glob("**/train/*.jpg", recursive=True)
-    )
+    # Locate dataset across relative and Colab paths
+    candidate_paths = [
+        "minneapple-1-1/train/*.jpg",
+        "../minneapple-1-1/train/*.jpg",
+        "/content/minneapple-1-1/train/*.jpg",
+        "/content/MachineVisionGroupwork/minneapple-1-1/train/*.jpg",
+        "**/train/*.jpg",
+    ]
+
+    img_files = []
+    for pattern in candidate_paths:
+        matched = glob.glob(pattern, recursive=True)
+        if matched:
+            img_files = matched
+            break
 
     if not img_files:
         print("[ERROR] Could not find dataset images in minneapple-1-1/train/.")

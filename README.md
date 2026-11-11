@@ -1,36 +1,26 @@
-# Machine Vision (UFMFRR-15-M) - Stage 1 Preprocessing
+# Machine Vision (UFMFRR-15-M) - Group Project
 
-This repository contains the concise, standalone implementation for **Stage 1 (Radiometric & Spatial Preprocessing)**.
+## Repository Structure
 
----
-
-## 1. What Stage 1 Does (Units 2, 4, 5)
-- **Colour Space Conversion (Unit 2):** Converts input RGB into HSV/HSI to decouple intrinsic chrominance (Hue & Saturation) from illumination (Value/Intensity).
-- **Contrast Normalisation (Unit 4):** Applies Contrast-Limited Adaptive Histogram Equalisation (**CLAHE**) exclusively to the Intensity channel to normalise harsh canopy shadows without causing hue shifts.
-- **Spatial Denoising (Unit 5):** Applies a $3 \times 3$ (apples) or $5 \times 5$ (resistors) **Median Filter** to remove speckle noise and specular glare streaks without blurring edges, followed by a $3 \times 3$ **Gaussian Filter**.
+- **`Jakub/`**: Stage 1 Preprocessing implementation by Jakub Wrzyszcz.
+  - `stage1_preprocessing.py`: Standalone script for Stage 1 (Colour Space Decoupling, Intensity CLAHE, Median Denoising).
+  - `Stage1_Preprocessing.ipynb`: Google Colab notebook for Stage 1.
+  - `download_minneapple.py`: Dataset downloader using Roboflow SDK.
 
 ---
 
-## 2. File Overview
+## Stage 1: Radiometric & Spatial Preprocessing (Units 2, 4, 5)
 
-- `stage1_preprocessing.py`: Single standalone script that performs Stage 1 on your dataset and displays the before/after results.
-- `Stage1_Preprocessing.ipynb`: Single-cell Google Colab notebook.
-- `download_minneapple.py`: Script to download the MinneApple dataset via the Roboflow SDK.
+### Running Jakub's Stage 1 Code
 
----
-
-## 3. How to Run
-
-### In Google Colab
+#### In Google Colab:
 ```python
 !git clone https://github.com/jakubwrz/MachineVisionGroupwork.git
-%cd MachineVisionGroupwork
+%cd MachineVisionGroupwork/Jakub
 !python stage1_preprocessing.py
 ```
 
-Or open `Stage1_Preprocessing.ipynb` directly in Google Colab.
-
-### Locally
+#### Locally:
 ```bash
-python stage1_preprocessing.py
+python Jakub/stage1_preprocessing.py
 ```

@@ -2,7 +2,7 @@
 MinneApple Dataset Downloader via Roboflow SDK
 Machine Vision (UFMFRR-15-M) Group Project
 
-Primary Contributor: [Name]
+Primary Contributor: Jakub Wrzyszcz
 """
 
 import os
