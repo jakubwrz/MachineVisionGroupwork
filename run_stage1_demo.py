@@ -14,7 +14,8 @@ It handles both project scenarios:
      demonstrates 5x5 median filtering to eliminate bright specular glare streaks.
 
 Outputs:
-  - Diagnostic 8-panel figures (Report Section 2.2 / 2.3)
+  - Inline matplotlib plots in Google Colab / Jupyter
+  - Diagnostic 8-panel figures saved to output/ directory
   - 1D cross-sectional specular reflection glint suppression profile
 """
 
@@ -25,8 +26,17 @@ import numpy as np
 import cv2
 import matplotlib.pyplot as plt
 
-# Ensure local imports work
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+# Safe root directory resolution in both terminal scripts and interactive Colab / Jupyter cells
+try:
+    BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+except NameError:
+    # Triggered when running inside an interactive notebook / IPython / Colab cell where __file__ is undefined
+    BASE_DIR = os.path.abspath(os.getcwd())
+
+# Add BASE_DIR and common Colab clone paths to sys.path
+for cand_path in [BASE_DIR, os.path.join(BASE_DIR, "MachineVisionGroupwork"), "/content/MachineVisionGroupwork"]:
+    if os.path.exists(os.path.join(cand_path, "src")) and cand_path not in sys.path:
+        sys.path.insert(0, cand_path)
 
 from src.stage1_preprocessing import (
     preprocess_image,
@@ -36,6 +46,15 @@ from src.stage1_preprocessing import (
     DEFAULT_RESISTOR_CONFIG,
 )
 from src.minneapple_dataset import MinneAppleDataset
+
+
+def is_interactive() -> bool:
+    """Returns True if running inside an IPython/Colab notebook environment."""
+    try:
+        from IPython import get_ipython
+        return get_ipython() is not None
+    except Exception:
+        return False
 
 
 def create_synthetic_orchard_scene(height: int = 400, width: int = 500) -> np.ndarray:
@@ -129,6 +148,7 @@ def run_demonstration():
     print("=" * 75)
 
     os.makedirs("output", exist_ok=True)
+    interactive = is_interactive()
 
     # --------------------------------------------------------------------------
     # 1. ORCHARD APPLE SCENARIO (TASK 1)
@@ -171,7 +191,10 @@ def run_demonstration():
         title=f"Stage 1 Diagnostics: {title_prefix} (Units 2, 4, 5)",
         save_path=apple_fig_path
     )
-    plt.close(fig1)
+    if interactive:
+        plt.show()
+    else:
+        plt.close(fig1)
     print(f"  -> Saved diagnostic figure: {apple_fig_path}")
 
     # Demonstrate 512x512 Tiling with 20% overlap
@@ -195,7 +218,10 @@ def run_demonstration():
         title="Stage 1 Diagnostics: Resistor Body & Specular Glare Preprocessing (Units 2, 4, 5)",
         save_path=resistor_fig_path
     )
-    plt.close(fig2)
+    if interactive:
+        plt.show()
+    else:
+        plt.close(fig2)
     print(f"  -> Saved diagnostic figure: {resistor_fig_path}")
 
     # --------------------------------------------------------------------------
@@ -211,7 +237,10 @@ def run_demonstration():
         title="Specular Glare Profile on Cylindrical Resistor Body (Unit 5 Median Filtering)",
         save_path=profile_fig_path
     )
-    plt.close(fig3)
+    if interactive:
+        plt.show()
+    else:
+        plt.close(fig3)
     print(f"  -> Saved 1D profile figure: {profile_fig_path}")
 
     print("\n" + "=" * 75)

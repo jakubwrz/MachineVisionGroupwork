@@ -11,7 +11,13 @@ import unittest
 import numpy as np
 
 # Ensure src is in python path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+try:
+    BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+except NameError:
+    BASE_DIR = os.path.abspath(os.getcwd())
+
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
 
 from src.stage1_preprocessing import (
     rgb_to_hsi,
