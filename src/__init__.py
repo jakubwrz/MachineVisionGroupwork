@@ -21,6 +21,11 @@ from .stage1_preprocessing import (
     DEFAULT_RESISTOR_CONFIG,
 )
 
+from .minneapple_dataset import (
+    MinneAppleDataset,
+    process_minneapple_batch,
+)
+
 __all__ = [
     "rgb_to_hsi",
     "hsi_to_rgb",
@@ -37,4 +42,6 @@ __all__ = [
     "plot_specular_line_profile_comparison",
     "DEFAULT_APPLE_CONFIG",
     "DEFAULT_RESISTOR_CONFIG",
+    "MinneAppleDataset",
+    "process_minneapple_batch",
 ]

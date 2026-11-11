@@ -2,7 +2,7 @@
 ## Stage 1: Radiometric & Spatial Preprocessing (Units 2, 4, 5)
 
 This repository contains the complete implementation for **Stage 1** of the unified 5-stage machine vision pipeline for both:
-1. **Task 1: Orchard Apple Counting** (Handling non-uniform solar canopy illumination gradients and dappled shadowing).
+1. **Task 1: Orchard Apple Counting** (Handling non-uniform solar canopy illumination gradients and dappled shadowing on the MinneApple dataset).
 2. **Task 2: Multi-Resistor Colour Band Classification** (Suppressing cylindrical specular reflection streaks and compensating for bench lighting).
 
 ---
@@ -33,18 +33,18 @@ Raw RGB imaging entangles surface reflectance (chrominance) with illumination ge
 
 ```text
 MachineVision_Groupwork/
+├── .gitignore                     # Gitignores images, dataset folders, and outputs
 ├── src/
 │   ├── __init__.py
-│   └── stage1_preprocessing.py   # Core reusable Stage 1 module
+│   ├── stage1_preprocessing.py   # Core reusable Stage 1 module
+│   └── minneapple_dataset.py     # MinneApple COCO dataset loader & 512x512 tiling
 ├── notebooks/
 │   └── Stage1_Radiometric_and_Spatial_Preprocessing.ipynb # Google Colab notebook
 ├── tests/
 │   └── test_stage1.py             # Rigorous unit test suite (built-in unittest)
-├── output/
-│   ├── figure_stage1_apple_diagnostics.png
-│   ├── figure_stage1_resistor_diagnostics.png
-│   └── figure_stage1_specular_profile.png
-├── run_stage1_demo.py             # Standalone demonstration & figure generator
+├── download_minneapple.py         # Roboflow SDK downloader (uses dummy key placeholder)
+├── process_minneapple_stage1.py   # Batch processor for MinneApple dataset
+├── run_stage1_demo.py             # Standalone demonstration & synthetic figure generator
 ├── generate_notebook.py           # Colab notebook generation script
 └── README.md
 ```
@@ -53,33 +53,32 @@ MachineVision_Groupwork/
 
 ## 3. Quick Start & Execution
 
-### Running Unit Tests
+### 1. Downloading the MinneApple Dataset
+Set your Roboflow API key via environment variable:
+```bash
+# On Linux/macOS
+export ROBOFLOW_API_KEY="your_api_key_here"
+
+# On Windows (PowerShell)
+$env:ROBOFLOW_API_KEY="your_api_key_here"
+
+python download_minneapple.py
+```
+
+### 2. Processing the Exact MinneApple Dataset
+```bash
+python process_minneapple_stage1.py
+```
+This loads all 630 images and 25,440 annotations, executes Stage 1 across a sample batch, and demonstrates high-resolution $512 \times 512$ tiling with 20% overlap.
+
+### 3. Running Unit Tests
 ```bash
 python -m unittest tests/test_stage1.py
 ```
 
-### Running the Demonstration Script
+### 4. Running the Synthetic Benchmark Demonstration
 ```bash
 python run_stage1_demo.py
-```
-This processes both benchmark scenarios and saves publication-ready figures to `output/`.
-
-### Using the Python Module Directly
-```python
-import cv2
-from src.stage1_preprocessing import preprocess_image, plot_stage1_diagnostics
-
-# Load RGB image
-img_rgb = cv2.cvtColor(cv2.imread("sample.jpg"), cv2.COLOR_BGR2RGB)
-
-# Task 1: Orchard Apple Preprocessing
-apple_out = preprocess_image(img_rgb, mode="apple")
-
-# Task 2: Multi-Resistor Preprocessing
-resistor_out = preprocess_image(img_rgb, mode="resistor")
-
-# Plot side-by-side diagnostic figures
-fig = plot_stage1_diagnostics(resistor_out)
 ```
 
 ---
@@ -88,3 +87,4 @@ fig = plot_stage1_diagnostics(resistor_out)
 - **Cell Headers:** Every cell in `notebooks/Stage1_Radiometric_and_Spatial_Preprocessing.ipynb` contains the mandatory `# Primary Contributor: [Name]` header.
 - **Diagnostic Plots:** Side-by-side diagnostic figures display RGB inputs, channel breakdowns, equalised outputs, and empirical CDF linearisation.
 - **Unified Pipeline:** Both tasks share the same core functions and classes, adhering to the 5-stage architecture.
+- **Image Gitignore:** Datasets and generated images are strictly excluded from git tracking via `.gitignore`.
