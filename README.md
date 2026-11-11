@@ -11,16 +11,3 @@
 
 ## Stage 1: Radiometric & Spatial Preprocessing (Units 2, 4, 5)
 
-### Running Jakub's Stage 1 Code
-
-#### In Google Colab:
-```python
-!git clone https://github.com/jakubwrz/MachineVisionGroupwork.git
-%cd MachineVisionGroupwork/Jakub
-!python stage1_preprocessing.py
-```
-
-#### Locally:
-```bash
-python Jakub/stage1_preprocessing.py
-```
