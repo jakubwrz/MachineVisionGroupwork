@@ -35,7 +35,7 @@ env/
 .ipynb_checkpoints
 */.ipynb_checkpoints/*
 
-# Datasets and image files (Strictly Gitignored per assignment / user requirement)
+# Datasets and image files
 minneapple-1-1/
 *.jpg
 *.jpeg
@@ -45,6 +45,10 @@ minneapple-1-1/
 *.tif
 *.tiff
 *.webp
+
+# Explicitly track the captured Resistor Dataset as requested
+!Resistor Dataset/
+!Resistor Dataset/**
 
 # Output directories containing generated figures/visualizations
 output/
