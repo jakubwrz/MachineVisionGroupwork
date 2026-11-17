@@ -14,16 +14,17 @@ Pipeline Architecture:
   Stage 2: Candidate Foreground Segmentation (Units 3, 4)
     - Apples: Feature fusion of CIE LAB a* (redness) and HSV Saturation S, binarised via Otsu's thresholding.
       Benchmarked against cv2.kmeans (k=3) in 3D (S, a*, b*) feature space.
-    - Resistors: Inverted Gaussian adaptive thresholding (cv2.adaptiveThreshold) with 5x5 morphological
-      closing (cv2.MORPH_CLOSE) to bridge dark colour bands, keeping component bodies with area > 500 px.
+    - Resistors: Inverted Gaussian adaptive thresholding (cv2.adaptiveThreshold) with a wide block size (101)
+      and 5x5 morphological closing (cv2.MORPH_CLOSE) + hole filling to bridge dark colour bands,
+      extracting solid component bodies with area > 1500 px.
 
   Stage 3: Morphology, Pose Alignment & Region Proposals (Unit 4)
     - Apples (Watershed Splitting): 3x3 opening, topological hole filling, and Euclidean Distance Transform
       (cv2.distanceTransform, L2 metric) to detect topological seeds for marker-controlled cv2.watershed,
       exporting standardized 64x64 candidate fruit crops.
-    - Resistors (Pose & Slicing): cv2.minAreaRect and cv2.warpAffine horizontal alignment, stripping thin
-      wire leads via vertical column thickness profile, and slicing bands via vertical Sobel filtering
-      and 1D sliding windows, exporting standardized 64x64 band crops.
+    - Resistors (Pose Alignment & Band Slicing): Vector-based cv2.minAreaRect and cv2.warpAffine horizontal alignment,
+      wire lead stripping by column thickness profile (isolating the active ceramic cylinder), and slicing
+      standardized 64x64 colour band proposals across the active body.
 
   Stage 4: Unified 95D Feature Extraction & PCA (Units 2, 4, 6, 7)
     - 32 Colour Descriptors: 20 statistical moments (mean, std, skewness, kurtosis across H, S, a*, b*, I)
@@ -166,23 +167,30 @@ def benchmark_apple_kmeans(rgb_img, k=3):
     return mask_kmeans, centers
 
 
-def segment_resistors_adaptive(rgb_img, min_area=500):
-    """Segments resistor bodies using adaptive Gaussian thresholding and 5x5 closing."""
+def segment_resistors_adaptive(rgb_img, min_area=1500):
+    """
+    Segments resistor bodies using adaptive Gaussian thresholding with a wide block size,
+    morphological closing to bridge dark bands, and topological hole filling.
+    """
     gray = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    # Inverted adaptive thresholding: dark resistors against bright bench -> foreground
+    # Wide block size (101) ensures wide resistor bodies are not hollowed out
     raw_thresh = cv2.adaptiveThreshold(
-        blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 10
+        blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 101, 15
     )
 
-    # 5x5 Morphological closing to bridge across dark color bands
+    # 5x5 Morphological closing to bridge dark colour bands and specular highlights
     kernel_5x5 = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    closed = cv2.morphologyEx(raw_thresh, cv2.MORPH_CLOSE, kernel_5x5, iterations=2)
+    closed = cv2.morphologyEx(raw_thresh, cv2.MORPH_CLOSE, kernel_5x5, iterations=3)
 
-    # Connected component filtering: retain blobs with area > min_area
+    # Hole-filling to guarantee solid component bodies
     contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    body_mask = np.zeros_like(closed)
+    filled = np.zeros_like(closed)
+    cv2.drawContours(filled, contours, -1, 255, thickness=cv2.FILLED)
+
+    # Filter connected component blobs
+    body_mask = np.zeros_like(filled)
     resistor_blobs = []
     for c in contours:
         if cv2.contourArea(c) >= min_area:
@@ -208,14 +216,12 @@ def segment_foreground(rgb_img, mode="apple"):
 
 def extract_apple_proposals(rgb_img, binary_mask, target_size=(64, 64)):
     """Watershed splitting via Euclidean Distance Transform and proposal cropping."""
-    # 1. 3x3 Opening and Hole-Filling
     kernel_3x3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     opened = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN, kernel_3x3)
     contours, _ = cv2.findContours(opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     filled = np.zeros_like(opened)
     cv2.drawContours(filled, contours, -1, 255, thickness=cv2.FILLED)
 
-    # 2. Euclidean Distance Transform (L2)
     dist = cv2.distanceTransform(filled, cv2.DIST_L2, 5)
     max_d = dist.max()
     sure_fg = np.zeros_like(filled)
@@ -232,7 +238,6 @@ def extract_apple_proposals(rgb_img, binary_mask, target_size=(64, 64)):
 
     markers = cv2.watershed(rgb_img.copy(), markers)
 
-    # 3. Crop 64x64 Proposals
     h_img, w_img = rgb_img.shape[:2]
     crops, masks, metadata = [], [], []
 
@@ -268,77 +273,101 @@ def extract_apple_proposals(rgb_img, binary_mask, target_size=(64, 64)):
 
 
 def extract_resistor_proposals(rgb_img, body_mask, resistor_blobs, target_size=(64, 64)):
-    """Horizontal alignment, wire lead stripping, and vertical Sobel band slicing."""
+    """Horizontal alignment, wire lead stripping, and band slicing across active bodies."""
     h_img, w_img = rgb_img.shape[:2]
     crops, masks, metadata = [], [], []
     aligned_bodies = []
 
     for idx, c in enumerate(resistor_blobs):
         rect = cv2.minAreaRect(c)
-        (cx, cy), (rw, rh), angle = rect
+        box = cv2.boxPoints(rect)
+        e1 = box[1] - box[0]
+        e2 = box[2] - box[1]
+        l1 = np.linalg.norm(e1)
+        l2 = np.linalg.norm(e2)
 
-        # Align longest axis horizontally
-        if rw < rh:
-            rot_angle = angle - 90.0 if angle >= 0 else angle + 90.0
-            length, thickness = rh, rw
+        if l1 >= l2:
+            long_vec, long_len, short_len = e1, l1, l2
         else:
-            rot_angle = angle
-            length, thickness = rw, rh
+            long_vec, long_len, short_len = e2, l2, l1
 
-        if length < 60 or thickness < 12:
+        if long_len < 120 or short_len < 10:
             continue
 
-        M = cv2.getRotationMatrix2D((cx, cy), rot_angle, 1.0)
+        # True angle of the major cylindrical axis
+        angle = float(np.degrees(np.arctan2(long_vec[1], long_vec[0])))
+        cx, cy = rect[0]
+
+        # Rotate component so major axis is strictly horizontal
+        M = cv2.getRotationMatrix2D((cx, cy), angle, 1.0)
         rot_img = cv2.warpAffine(rgb_img, M, (w_img, h_img), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
         rot_mask = cv2.warpAffine(body_mask, M, (w_img, h_img), flags=cv2.INTER_NEAREST)
 
-        x1 = int(max(0, cx - length / 2))
-        x2 = int(min(w_img, cx + length / 2))
-        y1 = int(max(0, cy - thickness))
-        y2 = int(min(h_img, cy + thickness))
+        x1 = int(max(0, cx - long_len / 2))
+        x2 = int(min(w_img, cx + long_len / 2))
+        y1 = int(max(0, cy - short_len * 0.75))
+        y2 = int(min(h_img, cy + short_len * 0.75))
 
-        crop_res = rot_img[y1:y2, x1:x2]
+        crop = rot_img[y1:y2, x1:x2]
         crop_m = rot_mask[y1:y2, x1:x2]
-        if crop_res.shape[1] < 40 or crop_res.shape[0] < 10:
+        cw = crop.shape[1]
+        if cw < 60:
             continue
 
-        # Strip wire leads by vertical column thickness profile
+        # Strip wire leads: body is in central region with peak thickness (>35 px vs wire <15 px)
         col_thick = np.sum(crop_m > 0, axis=0)
-        max_thick = col_thick.max()
-        if max_thick == 0:
+        smooth_thick = np.convolve(col_thick, np.ones(21) / 21.0, mode="same")
+
+        c_start = int(cw * 0.25)
+        c_end = int(cw * 0.75)
+        if c_end <= c_start:
             continue
-        body_cols = np.where(col_thick > 0.35 * max_thick)[0]
-        if len(body_cols) > 30:
-            bx1, bx2 = body_cols[0], body_cols[-1]
-            body_crop = crop_res[:, bx1:bx2]
-            body_mask_crop = crop_m[:, bx1:bx2]
-        else:
-            body_crop = crop_res
-            body_mask_crop = crop_m
+
+        center_peak = c_start + int(np.argmax(smooth_thick[c_start:c_end]))
+        max_th = smooth_thick[center_peak]
+        if max_th < 15:
+            continue
+
+        # Find body boundaries where thickness drops below 55% of peak
+        bx1 = center_peak
+        while bx1 > max(0, c_start - 30) and smooth_thick[bx1] > 0.55 * max_th:
+            bx1 -= 1
+        bx2 = center_peak
+        while bx2 < min(cw - 1, c_end + 30) and smooth_thick[bx2] > 0.55 * max_th:
+            bx2 += 1
+
+        body_crop = crop[:, bx1:bx2]
+        body_m = crop_m[:, bx1:bx2]
+
+        # Crop tight vertical rows to eliminate table paper background
+        row_thick = np.sum(body_m > 0, axis=1)
+        if len(row_thick) > 0 and row_thick.max() > 0:
+            act_rows = np.where(row_thick > 0.4 * row_thick.max())[0]
+            if len(act_rows) > 10:
+                body_crop = body_crop[act_rows[0]:act_rows[-1], :]
+                body_m = body_m[act_rows[0]:act_rows[-1], :]
+
+        bh, bw = body_crop.shape[:2]
+        if bw < 25 or bh < 12:
+            continue
 
         aligned_bodies.append(body_crop)
 
-        # Slice bands via vertical Sobel on central 60%
-        bh, bw = body_crop.shape[:2]
-        if bw < 30 or bh < 10:
-            continue
-        center_strip = body_crop[int(bh * 0.2):int(bh * 0.8), :]
-        gray_strip = cv2.cvtColor(center_strip, cv2.COLOR_RGB2GRAY)
-        sobel_x = cv2.Sobel(gray_strip, cv2.CV_64F, 1, 0, ksize=3)
+        # Slice 4-5 Color Band Proposals Across Active Body
+        n_bands = 4
+        win_w = max(16, bw // n_bands)
+        for b_idx in range(n_bands):
+            wx = int(b_idx * (bw - win_w) / max(1, n_bands - 1))
+            band_patch = body_crop[:, wx:wx + win_w]
+            band_m_patch = body_m[:, wx:wx + win_w]
 
-        window_w = max(16, int(bw * 0.12))
-        step = max(8, int(window_w * 0.8))
-
-        for wx in range(0, bw - window_w, step):
-            b_patch = body_crop[:, wx:wx + window_w]
-            bm_patch = body_mask_crop[:, wx:wx + window_w]
-
-            crops.append(cv2.resize(b_patch, target_size, interpolation=cv2.INTER_AREA))
-            masks.append(cv2.resize(bm_patch, target_size, interpolation=cv2.INTER_NEAREST))
+            crops.append(cv2.resize(band_patch, target_size, interpolation=cv2.INTER_AREA))
+            masks.append(cv2.resize(band_m_patch, target_size, interpolation=cv2.INTER_NEAREST))
             metadata.append({
                 "resistor_id": idx,
+                "band_index": b_idx,
                 "window_x": wx,
-                "sobel_score": float(np.mean(np.abs(sobel_x[:, wx:wx + window_w]))),
+                "type": "resistor_band",
             })
 
     return crops, masks, metadata, {"aligned_bodies": aligned_bodies}
@@ -352,7 +381,7 @@ def extract_proposals(rgb_img, mask, mode="apple", extra_data=None):
         blobs = extra_data.get("blobs", []) if extra_data else []
         if not blobs:
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            blobs = [c for c in contours if cv2.contourArea(c) > 500]
+            blobs = [c for c in contours if cv2.contourArea(c) > 1500]
         return extract_resistor_proposals(rgb_img, mask, blobs)
 
 
@@ -451,7 +480,7 @@ def harvest_dataset_proposals(files, mode="apple", max_images=5):
             crops, masks, _, _ = extract_proposals(clean, mask, mode=mode, extra_data=extra)
             all_crops.extend(crops)
             all_masks.extend(masks)
-        except Exception as e:
+        except Exception:
             continue
     return all_crops, all_masks
 
