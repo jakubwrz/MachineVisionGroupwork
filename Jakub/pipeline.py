@@ -1,42 +1,61 @@
 """
-Machine Vision (UFMFRR-15-M) - Group Project
-Unified End-to-End Pipeline: Stages 1 to 4 (Apples & Resistors)
+Machine Vision (UFMFRR-15-M) - Group Portfolio Project
+Unified End-to-End Object Counting Pipeline: Stages 1 to 4
 
 Primary Contributor: Jakub Wrzyszcz
 
-Pipeline Architecture:
-  Stage 1: Radiometric & Spatial Preprocessing (Units 2, 4, 5)
-    - Decoupled Luminance CLAHE (CIE LAB L-channel) to normalize lighting without Hue shift.
-    - Spatial Denoising: Median filtering (3x3 for apples, 5x5 for resistors to suppress specular streaks)
-      followed by 3x3 Gaussian smoothing across RGB space.
-    - True Unit 2 Intensity computation: I = (R + G + B) / 3.
+Architectural Overview (Appendix A & Section 2.1 Formulation):
+  This pipeline implements a single coherent computer vision framework that addresses
+  object counting across contrasting image domains (orchard fruit counting and resistor
+  colour-band counting). In accordance with the assessment brief, all processing stages
+  are formulated using universal computer vision functions that adapt automatically
+  based on fundamental optical, radiometric, and geometric principles:
 
-  Stage 2: Candidate Foreground Segmentation (Units 3, 4)
-    - Apples: Feature fusion of CIE LAB a* (redness) and HSV Saturation S, binarised via Otsu's thresholding.
-      Benchmarked against cv2.kmeans (k=3) in 3D (S, a*, b*) feature space.
-    - Resistors: Inverted Gaussian adaptive thresholding (cv2.adaptiveThreshold) with a wide block size (101)
-      and 5x5 morphological closing (cv2.MORPH_CLOSE) + hole filling to bridge dark colour bands,
-      extracting solid component bodies with area > 1500 px.
+  Stage 1: Universal Radiometric & Spatial Preprocessing (Units 2, 4, 5)
+    - Decoupled Luminance Normalisation: Converts RGB to CIE LAB, applying Contrast Limited
+      Adaptive Histogram Equalisation (CLAHE) on the L-channel to standardise local contrast
+      and lighting without chromatic distortion.
+    - Spatial Denoising: Applies a 3x3 median filter (suppressing impulse/specular noise)
+      followed by Gaussian smoothing (3x3, sigma=0.8) across RGB colour space.
+    - Intensity & Chromatic Decomposition: Computes Unit 2 Intensity I = (R + G + B) / 3,
+      HSV (H, S, V), and LAB (L, a*, b*) representations.
 
-  Stage 3: Morphology, Pose Alignment & Region Proposals (Unit 4)
-    - Apples (Watershed Splitting): 3x3 opening, topological hole filling, and Euclidean Distance Transform
-      (cv2.distanceTransform, L2 metric) to detect topological seeds for marker-controlled cv2.watershed,
-      exporting standardized 64x64 candidate fruit crops.
-    - Resistors (Pose Alignment & Band Slicing): Vector-based cv2.minAreaRect and cv2.warpAffine horizontal alignment,
-      wire lead stripping by column thickness profile (isolating the active ceramic cylinder), and slicing
-      standardized 64x64 colour band proposals across the active body.
+  Stage 2: Universal Foreground Segmentation & Clustering Benchmark (Units 3, 4)
+    - Scene-Adaptive Contrast Binarisation: Automatically evaluates background illumination
+      level (L_bg). In high-luminance bench inspection environments (L_bg > 150), inverted
+      adaptive Gaussian thresholding isolates darker objects; in natural canopy environments
+      (L_bg <= 150), chromatic saliency fusion (CIE LAB a* red and b* yellow chroma with HSV S)
+      isolates fruit against foliage via Otsu's optimal thresholding.
+    - Morphological Regularisation: Applies 5x5 closing (cv2.MORPH_CLOSE) to bridge internal
+      discontinuities (such as colour bands) followed by topological hole-filling.
+    - Unsupervised Clustering Benchmark: Benchmarks thresholding against cv2.kmeans (k=3)
+      in 3D (S, a*, b*) colour feature space.
 
-  Stage 4: Unified 95D Feature Extraction & PCA (Units 2, 4, 6, 7)
+  Stage 3: Shape-Adaptive Morphological Proposal Generation (Unit 4)
+    - Universal Geometric Decomposition: Inspects the intrinsic aspect ratio (major / minor axis)
+      of candidate connected components:
+        * Radial / Compact Morphology (Aspect Ratio < 3.0): Applies Euclidean Distance Transform
+          (cv2.distanceTransform, L2 metric) and marker-controlled Watershed segmentation
+          (cv2.watershed) to separate touching spherical clusters (e.g., orchard fruit),
+          exporting standardized 64x64 candidate crops ranked by shape confidence.
+        * Axial / Elongated Morphology (Aspect Ratio >= 3.0): Determines principal orientation
+          from the minimum-area bounding box, aligns the instance horizontally via affine warp,
+          strips thin wire leads using transverse column thickness profiling (isolating the active
+          ceramic cylinder), and slices standardized 64x64 proposals across colour bands.
+
+  Stage 4: Unified 95D Feature Extraction & Dimensionality Reduction (Units 2, 4, 6, 7)
     - 32 Colour Descriptors: 20 statistical moments (mean, std, skewness, kurtosis across H, S, a*, b*, I)
       and 12 histogram bins (4 bins each for H, S, a*).
     - 59 Texture Descriptors: Rotation-invariant Uniform Local Binary Patterns (P=8, R=1, method='uniform').
-    - 4 Invariant Shape Metrics: Circularity, Solidity, Aspect Ratio, Extent (excluding raw coordinates and area).
-    - Dimensionality Reduction: StandardScaler and PCA(n_components=0.95) fit on the training split only.
+    - 4 Invariant Shape Metrics: Circularity, Solidity, Aspect Ratio, and Extent.
+    - Dimensionality Reduction: StandardScaler and PCA(n_components=0.95) fit strictly on the
+      training split to prevent data leakage, evaluating cumulative explained variance.
 """
 
 import os
 import glob
 import time
+import argparse
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
@@ -48,12 +67,15 @@ from sklearn.model_selection import train_test_split
 
 
 # ==============================================================================
-# DATA RESOLUTION UTILITIES
+# DATASET UTILITIES
 # ==============================================================================
 
-def resolve_dataset_files(mode="apple"):
-    """Finds image file paths for either MinneApple or Resistor Dataset."""
-    if mode == "apple":
+def resolve_dataset_files(target="apple"):
+    """
+    Finds image file paths for either MinneApple or Resistor Dataset.
+    Supports local workspace folders and Google Colab default paths.
+    """
+    if target == "apple":
         patterns = [
             "minneapple-1-1/train/*.jpg",
             "/content/minneapple-1-1/train/*.jpg",
@@ -72,15 +94,18 @@ def resolve_dataset_files(mode="apple"):
     for p in patterns:
         files = glob.glob(p, recursive=True)
         if files:
-            return files
+            return sorted(files)
     return []
 
 
 def load_normalized_image(img_path, max_dim=1280):
-    """Loads an image, standardizes max spatial dimension, and converts to RGB."""
+    """
+    Loads an image from disk, normalizes maximum spatial dimension to preserve
+    aspect ratio without excessive memory consumption, and converts BGR to RGB.
+    """
     bgr = cv2.imread(img_path)
     if bgr is None:
-        raise FileNotFoundError(f"Could not load image: {img_path}")
+        raise FileNotFoundError(f"Could not load image at path: {img_path}")
     h, w = bgr.shape[:2]
     if max(h, w) > max_dim:
         scale = float(max_dim) / float(max(h, w))
@@ -89,36 +114,39 @@ def load_normalized_image(img_path, max_dim=1280):
 
 
 # ==============================================================================
-# STAGE 1: RADIOMETRIC & SPATIAL PREPROCESSING (UNITS 2, 4, 5)
+# STAGE 1: UNIVERSAL RADIOMETRIC & SPATIAL PREPROCESSING (UNITS 2, 4, 5)
 # ==============================================================================
 
 def compute_intensity(rgb_img):
-    """Computes true Unit 2 Slide 25 Intensity: I = (R + G + B) / 3."""
+    """
+    Computes true Unit 2 Intensity: I = (R + G + B) / 3.
+    """
     return np.mean(rgb_img.astype(np.float32), axis=2).astype(np.uint8)
 
 
-def preprocess_image(rgb_img, mode="apple"):
+def preprocess_image(rgb_img, clahe_clip=2.0, grid_size=(8, 8), median_k=3, gauss_sigma=0.8):
     """
-    Stage 1 Unified Preprocessing:
-      1. Contrast Normalisation on Luminance (LAB L) via CLAHE.
-      2. Spatial Denoising: Median filtering (3x3 for apples, 5x5 for resistors) + 3x3 Gaussian.
-      3. Channel Extraction: Returns preprocessed RGB, H, S, V, Intensity I, raw L, and equalised L.
+    Universal Stage 1 Preprocessing function applicable to any RGB input image:
+      1. Converts RGB to CIE LAB color space.
+      2. Applies CLAHE exclusively on the luminance (L) channel to normalize
+         uneven illumination while preserving chromaticity without color shifts.
+      3. Converts back to RGB and applies spatial filtering: a 3x3 median blur
+         for impulse noise suppression, followed by Gaussian smoothing (sigma=0.8).
+      4. Extracts multi-space representations: HSV (H, S, V), LAB, and Intensity I.
     """
-    # 1. CLAHE on Luminance (L)
+    # 1. CLAHE on Luminance (LAB L-channel)
     lab = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2LAB)
     l_raw, a_chan, b_chan = cv2.split(lab)
 
-    clip = 2.5 if mode == "apple" else 2.0
-    clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(8, 8))
+    clahe = cv2.createCLAHE(clipLimit=clahe_clip, tileGridSize=grid_size)
     l_eq = clahe.apply(l_raw)
     eq_rgb = cv2.cvtColor(cv2.merge([l_eq, a_chan, b_chan]), cv2.COLOR_LAB2RGB)
 
-    # 2. Spatial Denoising in RGB Space
-    k_med = 3 if mode == "apple" else 5
-    denoised_rgb = cv2.medianBlur(eq_rgb, k_med)
-    clean_rgb = cv2.GaussianBlur(denoised_rgb, (3, 3), 0.8)
+    # 2. Spatial Noise Reduction
+    denoised_rgb = cv2.medianBlur(eq_rgb, median_k)
+    clean_rgb = cv2.GaussianBlur(denoised_rgb, (3, 3), gauss_sigma)
 
-    # 3. Channels
+    # 3. Channel Representations
     hsv = cv2.cvtColor(clean_rgb, cv2.COLOR_RGB2HSV)
     h, s, v = cv2.split(hsv)
     i_chan = compute_intensity(clean_rgb)
@@ -127,29 +155,79 @@ def preprocess_image(rgb_img, mode="apple"):
 
 
 # ==============================================================================
-# STAGE 2: FOREGROUND SEGMENTATION (UNITS 3, 4)
+# STAGE 2: UNIVERSAL FOREGROUND SEGMENTATION & BENCHMARKING (UNITS 3, 4)
 # ==============================================================================
 
-def segment_apples_otsu(rgb_img, alpha=0.6):
-    """Fuses CIE LAB a* and HSV Saturation S, followed by Otsu thresholding."""
+def segment_foreground(rgb_img, method="auto", min_area=80):
+    """
+    Universal Stage 2 Foreground Segmentation function:
+      Adapts based on optical background illumination (L_bg):
+        - High-Luminance Backgrounds (L_bg > 150, e.g. bright workbench / paper):
+          Uses inverted adaptive Gaussian thresholding (block size 101, C=15)
+          to isolate dark component bodies and leads against bright backgrounds.
+        - Natural / Low-Luminance Backgrounds (L_bg <= 150, e.g. orchard canopy):
+          Uses chromatic contrast fusion (CIE LAB a* red and b* yellow chroma with HSV S)
+          to separate fruits from foliage, binarized via Otsu's threshold.
+      Followed by 5x5 morphological closing (cv2.MORPH_CLOSE) to bridge internal
+      discontinuities (such as colour bands) and topological hole-filling to form solid masks.
+    """
     lab = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2LAB)
-    hsv = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2HSV)
+    l_chan = lab[:, :, 0]
 
-    a_chan = lab[:, :, 1].astype(np.float32)
-    s_chan = hsv[:, :, 1].astype(np.float32)
+    # Sample border pixels to determine ambient background luminance level
+    border = np.concatenate([l_chan[0, :], l_chan[-1, :], l_chan[:, 0], l_chan[:, -1]])
+    bg_L = float(np.median(border))
 
-    # Penalize green foliage chromaticity (neutral gray is 120-128 in uint8 LAB)
-    a_diff = np.clip(a_chan - 120.0, 0.0, None)
-    a_norm = cv2.normalize(a_diff, None, 0, 255, cv2.NORM_MINMAX)
-    s_norm = cv2.normalize(s_chan, None, 0, 255, cv2.NORM_MINMAX)
+    use_adaptive = (method == "adaptive") or (method == "auto" and bg_L > 150.0)
 
-    fused_map = (alpha * a_norm + (1.0 - alpha) * s_norm).astype(np.uint8)
-    thresh_val, mask_otsu = cv2.threshold(fused_map, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return mask_otsu, fused_map, thresh_val
+    if use_adaptive:
+        gray = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        raw_binary = cv2.adaptiveThreshold(
+            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 101, 15
+        )
+        debug_info = {"method": "adaptive_gaussian", "bg_L": bg_L}
+    else:
+        hsv = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2HSV)
+        a_chan = lab[:, :, 1].astype(np.float32)
+        b_chan = lab[:, :, 2].astype(np.float32)
+        s_chan = hsv[:, :, 1].astype(np.float32)
+
+        # Fruit chromatic contrast: red chroma (a* > 124) + yellow chroma (b* > 138) weighted by saturation S
+        fruit_chroma = np.maximum(a_chan - 124.0, 0.0) + np.maximum(b_chan - 138.0, 0.0)
+        saliency = fruit_chroma * (s_chan / 255.0)
+        saliency_norm = cv2.normalize(saliency, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+        thresh_val, raw_binary = cv2.threshold(saliency_norm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        debug_info = {"method": "otsu_chroma_fusion", "thresh_val": thresh_val, "bg_L": bg_L}
+
+    # Morphological closing (5x5) to bridge internal gaps and dark colour bands
+    kernel_5x5 = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    closed = cv2.morphologyEx(raw_binary, cv2.MORPH_CLOSE, kernel_5x5, iterations=3)
+
+    # Topological hole filling to guarantee solid candidate object masks
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    filled = np.zeros_like(closed)
+    cv2.drawContours(filled, contours, -1, 255, thickness=cv2.FILLED)
+
+    # Filter noise blobs below minimum area threshold
+    clean_mask = np.zeros_like(filled)
+    valid_contours = []
+    for c in contours:
+        if cv2.contourArea(c) >= min_area:
+            cv2.drawContours(clean_mask, [c], -1, 255, thickness=cv2.FILLED)
+            valid_contours.append(c)
+
+    return clean_mask, debug_info, valid_contours
 
 
-def benchmark_apple_kmeans(rgb_img, k=3):
-    """Clusters pixels in 3D (S, a*, b*) space using cv2.kmeans for benchmarking."""
+def benchmark_clustering(rgb_img, k=3):
+    """
+    Universal Unsupervised Clustering Benchmark (cv2.kmeans):
+      Clusters image pixels in 3D (S, a*, b*) colour feature space to partition
+      foreground from background, benchmarking execution time and segmentation
+      fidelity against thresholding.
+    """
     lab = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2LAB)
     hsv = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2HSV)
 
@@ -160,229 +238,236 @@ def benchmark_apple_kmeans(rgb_img, k=3):
     h, w = rgb_img.shape[:2]
     features = np.column_stack([s_chan.ravel(), a_chan.ravel(), b_chan.ravel()]).astype(np.float32)
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.2)
+
     _, labels, centers = cv2.kmeans(features, k, None, criteria, attempts=3, flags=cv2.KMEANS_PP_CENTERS)
+    fg_cluster_idx = int(np.argmax(centers[:, 0] + centers[:, 1]))
+    cluster_mask = (labels.reshape((h, w)) == fg_cluster_idx).astype(np.uint8) * 255
 
-    apple_idx = int(np.argmax(centers[:, 1]))
-    mask_kmeans = (labels.reshape((h, w)) == apple_idx).astype(np.uint8) * 255
-    return mask_kmeans, centers
-
-
-def segment_resistors_adaptive(rgb_img, min_area=1500):
-    """
-    Segments resistor bodies using adaptive Gaussian thresholding with a wide block size,
-    morphological closing to bridge dark bands, and topological hole filling.
-    """
-    gray = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-
-    # Wide block size (101) ensures wide resistor bodies are not hollowed out
-    raw_thresh = cv2.adaptiveThreshold(
-        blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 101, 15
-    )
-
-    # 5x5 Morphological closing to bridge dark colour bands and specular highlights
-    kernel_5x5 = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    closed = cv2.morphologyEx(raw_thresh, cv2.MORPH_CLOSE, kernel_5x5, iterations=3)
-
-    # Hole-filling to guarantee solid component bodies
-    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    filled = np.zeros_like(closed)
-    cv2.drawContours(filled, contours, -1, 255, thickness=cv2.FILLED)
-
-    # Filter connected component blobs
-    body_mask = np.zeros_like(filled)
-    resistor_blobs = []
-    for c in contours:
-        if cv2.contourArea(c) >= min_area:
-            cv2.drawContours(body_mask, [c], -1, 255, thickness=cv2.FILLED)
-            resistor_blobs.append(c)
-
-    return body_mask, raw_thresh, resistor_blobs
-
-
-def segment_foreground(rgb_img, mode="apple"):
-    """Unified Stage 2 function returning candidate binary mask."""
-    if mode == "apple":
-        mask, fused, thresh = segment_apples_otsu(rgb_img)
-        return mask, {"fused_map": fused, "thresh": thresh}
-    else:
-        mask, raw_thresh, blobs = segment_resistors_adaptive(rgb_img)
-        return mask, {"raw_thresh": raw_thresh, "blobs": blobs}
+    return cluster_mask, centers
 
 
 # ==============================================================================
-# STAGE 3: MORPHOLOGY, POSE ALIGNMENT & PROPOSALS (UNIT 4)
+# STAGE 3: SHAPE-ADAPTIVE MORPHOLOGICAL PROPOSAL GENERATION (UNIT 4)
 # ==============================================================================
 
-def extract_apple_proposals(rgb_img, binary_mask, target_size=(64, 64)):
-    """Watershed splitting via Euclidean Distance Transform and proposal cropping."""
-    kernel_3x3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    opened = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN, kernel_3x3)
-    contours, _ = cv2.findContours(opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    filled = np.zeros_like(opened)
-    cv2.drawContours(filled, contours, -1, 255, thickness=cv2.FILLED)
-
-    dist = cv2.distanceTransform(filled, cv2.DIST_L2, 5)
-    max_d = dist.max()
-    sure_fg = np.zeros_like(filled)
-    if max_d > 0:
-        _, sure_fg = cv2.threshold(dist, 0.30 * max_d, 255, cv2.THRESH_BINARY)
-    sure_fg = sure_fg.astype(np.uint8)
-
-    sure_bg = cv2.dilate(filled, kernel_3x3, iterations=3)
-    unknown = cv2.subtract(sure_bg, sure_fg)
-
-    num_markers, markers = cv2.connectedComponents(sure_fg)
-    markers = markers + 1
-    markers[unknown == 255] = 0
-
-    markers = cv2.watershed(rgb_img.copy(), markers)
-
+def extract_proposals(rgb_img, binary_mask, target_size=(64, 64), min_area=50):
+    """
+    Universal Stage 3 Proposal Generation function:
+      Inspects the intrinsic aspect ratio (major / minor axis) of each connected component:
+        - Radial / Compact Morphology (Aspect Ratio < 3.0):
+            Applies Euclidean Distance Transform (L2) and marker-controlled Watershed
+            segmentation to split clustered spherical objects (e.g. orchard fruit),
+            exporting standardized 64x64 candidate crops ranked by shape confidence.
+        - Axial / Elongated Morphology (Aspect Ratio >= 3.0):
+            Computes orientation from the minimum bounding rectangle, rotates the component
+            horizontally via affine transformation, strips thin wire leads using transverse
+            column thickness profiling (isolating the active ceramic cylinder), and slices
+            standardized 64x64 proposals across colour bands.
+      Returns:
+        crops: List of 64x64 RGB candidate crops.
+        masks: List of corresponding 64x64 binary masks.
+        metadata: List of diagnostic dictionaries with bounding boxes and morphology types.
+    """
     h_img, w_img = rgb_img.shape[:2]
-    crops, masks, metadata = [], [], []
+    hsv = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2HSV)
+    s_chan = hsv[:, :, 1]
 
-    for label in np.unique(markers):
-        if label < 2:
-            continue
-        inst_mask = (markers == label).astype(np.uint8) * 255
-        area = int(np.sum(inst_mask > 0))
-        if area < 50:
-            continue
+    contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        M = cv2.moments(inst_mask)
-        if M["m00"] == 0:
-            continue
-        cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
-        x, y, w, h = cv2.boundingRect(inst_mask)
+    crops, masks, metadata, conf_scores = [], [], [], []
 
-        side = max(w, h, 32)
-        half_side = int(side * 1.4) // 2
-        x1, x2 = max(0, cx - half_side), min(w_img, cx + half_side)
-        y1, y2 = max(0, cy - half_side), min(h_img, cy + half_side)
-
-        patch = rgb_img[y1:y2, x1:x2]
-        pmask = inst_mask[y1:y2, x1:x2]
-        if patch.shape[0] < 4 or patch.shape[1] < 4:
+    for idx, c in enumerate(contours):
+        if cv2.contourArea(c) < min_area:
             continue
 
-        crops.append(cv2.resize(patch, target_size, interpolation=cv2.INTER_AREA))
-        masks.append(cv2.resize(pmask, target_size, interpolation=cv2.INTER_NEAREST))
-        metadata.append({"centroid": (cx, cy), "bbox": (x, y, w, h), "area": area})
-
-    return crops, masks, metadata, {"dist_map": dist, "markers": markers}
-
-
-def extract_resistor_proposals(rgb_img, body_mask, resistor_blobs, target_size=(64, 64)):
-    """Horizontal alignment, wire lead stripping, and band slicing across active bodies."""
-    h_img, w_img = rgb_img.shape[:2]
-    crops, masks, metadata = [], [], []
-    aligned_bodies = []
-
-    for idx, c in enumerate(resistor_blobs):
         rect = cv2.minAreaRect(c)
         box = cv2.boxPoints(rect)
         e1 = box[1] - box[0]
         e2 = box[2] - box[1]
-        l1 = np.linalg.norm(e1)
-        l2 = np.linalg.norm(e2)
+        l1 = float(np.linalg.norm(e1))
+        l2 = float(np.linalg.norm(e2))
 
-        if l1 >= l2:
-            long_vec, long_len, short_len = e1, l1, l2
+        major_len = max(l1, l2)
+        minor_len = min(l1, l2)
+        aspect_ratio = major_len / (minor_len + 1e-6)
+
+        # ----------------------------------------------------------------------
+        # Case A: Radial / Compact Instances (e.g. spherical fruit / apples)
+        # ----------------------------------------------------------------------
+        if aspect_ratio < 3.0:
+            comp_mask = np.zeros_like(binary_mask)
+            cv2.drawContours(comp_mask, [c], -1, 255, thickness=cv2.FILLED)
+
+            dist = cv2.distanceTransform(comp_mask, cv2.DIST_L2, 5)
+            max_d = dist.max()
+            if max_d < 3.0:
+                continue
+
+            _, sure_fg = cv2.threshold(dist, 0.35 * max_d, 255, cv2.THRESH_BINARY)
+            sure_fg = sure_fg.astype(np.uint8)
+            sure_bg = cv2.dilate(comp_mask, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=2)
+            unknown = cv2.subtract(sure_bg, sure_fg)
+
+            num_markers, markers = cv2.connectedComponents(sure_fg)
+            if num_markers <= 1:
+                # Single isolated compact instance
+                M = cv2.moments(comp_mask)
+                if M["m00"] > 0:
+                    cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
+                    side = int(np.clip(max(major_len * 1.1, 48), 48, 100))
+                    hs = side // 2
+                    x1, x2 = max(0, cx - hs), min(w_img, cx + hs)
+                    y1, y2 = max(0, cy - hs), min(h_img, cy + hs)
+                    p_rgb = rgb_img[y1:y2, x1:x2]
+                    p_mask = comp_mask[y1:y2, x1:x2]
+                    if p_rgb.shape[0] >= 4 and p_rgb.shape[1] >= 4:
+                        perim = cv2.arcLength(c, True)
+                        circ = (4.0 * np.pi * float(cv2.contourArea(c))) / ((perim ** 2) + 1e-6)
+                        score = circ * float(np.mean(s_chan[y1:y2, x1:x2])) * float(max_d)
+
+                        crops.append(cv2.resize(p_rgb, target_size, interpolation=cv2.INTER_AREA))
+                        masks.append(cv2.resize(p_mask, target_size, interpolation=cv2.INTER_NEAREST))
+                        conf_scores.append(score)
+                        metadata.append({
+                            "type": "radial_single",
+                            "centroid": (cx, cy),
+                            "aspect_ratio": aspect_ratio,
+                            "area": int(M["m00"]),
+                        })
+            else:
+                # Touching cluster: resolve via marker-controlled watershed
+                markers = markers + 1
+                markers[unknown == 255] = 0
+                markers = cv2.watershed(rgb_img.copy(), markers)
+                for label in np.unique(markers):
+                    if label < 2:
+                        continue
+                    inst_m = (markers == label).astype(np.uint8) * 255
+                    inst_area = np.sum(inst_m > 0)
+                    if inst_area < min_area:
+                        continue
+                    M = cv2.moments(inst_m)
+                    if M["m00"] == 0:
+                        continue
+                    cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
+                    x, y, w, h = cv2.boundingRect(inst_m)
+                    side = int(np.clip(max(w, h), 48, 100))
+                    hs = side // 2
+                    x1, x2 = max(0, cx - hs), min(w_img, cx + hs)
+                    y1, y2 = max(0, cy - hs), min(h_img, cy + hs)
+                    p_rgb = rgb_img[y1:y2, x1:x2]
+                    p_mask = inst_m[y1:y2, x1:x2]
+                    if p_rgb.shape[0] >= 4 and p_rgb.shape[1] >= 4:
+                        inst_cnts, _ = cv2.findContours(inst_m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                        if inst_cnts:
+                            perim = cv2.arcLength(inst_cnts[0], True)
+                            circ = (4.0 * np.pi * float(inst_area)) / ((perim ** 2) + 1e-6)
+                        else:
+                            circ = 0.5
+                        score = circ * float(np.mean(s_chan[y1:y2, x1:x2])) * float(np.max(dist[y1:y2, x1:x2]))
+
+                        crops.append(cv2.resize(p_rgb, target_size, interpolation=cv2.INTER_AREA))
+                        masks.append(cv2.resize(p_mask, target_size, interpolation=cv2.INTER_NEAREST))
+                        conf_scores.append(score)
+                        metadata.append({
+                            "type": "radial_watershed",
+                            "centroid": (cx, cy),
+                            "aspect_ratio": aspect_ratio,
+                            "area": int(inst_area),
+                        })
+
+        # ----------------------------------------------------------------------
+        # Case B: Axial / Elongated Instances (e.g. cylindrical resistors with leads)
+        # ----------------------------------------------------------------------
         else:
-            long_vec, long_len, short_len = e2, l2, l1
+            long_vec = e1 if l1 >= l2 else e2
+            if major_len < 80 or minor_len < 8:
+                continue
 
-        if long_len < 120 or short_len < 10:
-            continue
+            # Compute orientation of the major axis
+            angle = float(np.degrees(np.arctan2(long_vec[1], long_vec[0])))
+            cx, cy = rect[0]
 
-        # True angle of the major cylindrical axis
-        angle = float(np.degrees(np.arctan2(long_vec[1], long_vec[0])))
-        cx, cy = rect[0]
+            # Rotate component so the major cylindrical axis is strictly horizontal
+            M_rot = cv2.getRotationMatrix2D((cx, cy), angle, 1.0)
+            rot_img = cv2.warpAffine(
+                rgb_img, M_rot, (w_img, h_img), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
+            )
+            comp_mask = np.zeros_like(binary_mask)
+            cv2.drawContours(comp_mask, [c], -1, 255, thickness=cv2.FILLED)
+            rot_mask = cv2.warpAffine(comp_mask, M_rot, (w_img, h_img), flags=cv2.INTER_NEAREST)
 
-        # Rotate component so major axis is strictly horizontal
-        M = cv2.getRotationMatrix2D((cx, cy), angle, 1.0)
-        rot_img = cv2.warpAffine(rgb_img, M, (w_img, h_img), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-        rot_mask = cv2.warpAffine(body_mask, M, (w_img, h_img), flags=cv2.INTER_NEAREST)
+            x1 = int(max(0, cx - major_len / 2))
+            x2 = int(min(w_img, cx + major_len / 2))
+            y1 = int(max(0, cy - minor_len * 0.75))
+            y2 = int(min(h_img, cy + minor_len * 0.75))
 
-        x1 = int(max(0, cx - long_len / 2))
-        x2 = int(min(w_img, cx + long_len / 2))
-        y1 = int(max(0, cy - short_len * 0.75))
-        y2 = int(min(h_img, cy + short_len * 0.75))
+            c_crop = rot_img[y1:y2, x1:x2]
+            c_mask = rot_mask[y1:y2, x1:x2]
+            cw = c_crop.shape[1]
+            if cw < 50:
+                continue
 
-        crop = rot_img[y1:y2, x1:x2]
-        crop_m = rot_mask[y1:y2, x1:x2]
-        cw = crop.shape[1]
-        if cw < 60:
-            continue
+            # Strip thin wire leads: body exhibits significantly higher transverse thickness
+            col_thick = np.sum(c_mask > 0, axis=0)
+            smooth_thick = np.convolve(col_thick, np.ones(21) / 21.0, mode="same")
+            c_start, c_end = int(cw * 0.25), int(cw * 0.75)
+            if c_end <= c_start:
+                continue
 
-        # Strip wire leads: body is in central region with peak thickness (>35 px vs wire <15 px)
-        col_thick = np.sum(crop_m > 0, axis=0)
-        smooth_thick = np.convolve(col_thick, np.ones(21) / 21.0, mode="same")
+            center_pk = c_start + int(np.argmax(smooth_thick[c_start:c_end]))
+            max_th = smooth_thick[center_pk]
+            if max_th < 15:
+                continue
 
-        c_start = int(cw * 0.25)
-        c_end = int(cw * 0.75)
-        if c_end <= c_start:
-            continue
+            # Locate ceramic body boundaries where thickness exceeds 55% of peak
+            bx1 = center_pk
+            while bx1 > max(0, c_start - 30) and smooth_thick[bx1] > 0.55 * max_th:
+                bx1 -= 1
+            bx2 = center_pk
+            while bx2 < min(cw - 1, c_end + 30) and smooth_thick[bx2] > 0.55 * max_th:
+                bx2 += 1
 
-        center_peak = c_start + int(np.argmax(smooth_thick[c_start:c_end]))
-        max_th = smooth_thick[center_peak]
-        if max_th < 15:
-            continue
+            body_crop = c_crop[:, bx1:bx2]
+            body_m = c_mask[:, bx1:bx2]
 
-        # Find body boundaries where thickness drops below 55% of peak
-        bx1 = center_peak
-        while bx1 > max(0, c_start - 30) and smooth_thick[bx1] > 0.55 * max_th:
-            bx1 -= 1
-        bx2 = center_peak
-        while bx2 < min(cw - 1, c_end + 30) and smooth_thick[bx2] > 0.55 * max_th:
-            bx2 += 1
+            # Crop tight vertical rows to eliminate background artifacts
+            row_thick = np.sum(body_m > 0, axis=1)
+            if len(row_thick) > 0 and row_thick.max() > 0:
+                act_rows = np.where(row_thick > 0.4 * row_thick.max())[0]
+                if len(act_rows) > 10:
+                    body_crop = body_crop[act_rows[0]:act_rows[-1], :]
+                    body_m = body_m[act_rows[0]:act_rows[-1], :]
 
-        body_crop = crop[:, bx1:bx2]
-        body_m = crop_m[:, bx1:bx2]
+            bh, bw = body_crop.shape[:2]
+            if bw < 25 or bh < 12:
+                continue
 
-        # Crop tight vertical rows to eliminate table paper background
-        row_thick = np.sum(body_m > 0, axis=1)
-        if len(row_thick) > 0 and row_thick.max() > 0:
-            act_rows = np.where(row_thick > 0.4 * row_thick.max())[0]
-            if len(act_rows) > 10:
-                body_crop = body_crop[act_rows[0]:act_rows[-1], :]
-                body_m = body_m[act_rows[0]:act_rows[-1], :]
+            # Slice standardized colour band proposals across the active body
+            n_bands = 4
+            win_w = max(16, bw // n_bands)
+            for b_idx in range(n_bands):
+                wx = int(b_idx * (bw - win_w) / max(1, n_bands - 1))
+                band_p = body_crop[:, wx:wx + win_w]
+                band_m = body_m[:, wx:wx + win_w]
+                crops.append(cv2.resize(band_p, target_size, interpolation=cv2.INTER_AREA))
+                masks.append(cv2.resize(band_m, target_size, interpolation=cv2.INTER_NEAREST))
+                conf_scores.append(float(bw * bh + b_idx))
+                metadata.append({
+                    "type": "axial_band",
+                    "resistor_id": idx,
+                    "band_index": b_idx,
+                    "aspect_ratio": aspect_ratio,
+                })
 
-        bh, bw = body_crop.shape[:2]
-        if bw < 25 or bh < 12:
-            continue
+    # Sort proposals descending by confidence score if available
+    if conf_scores and len(conf_scores) == len(crops):
+        sort_order = np.argsort(conf_scores)[::-1]
+        crops = [crops[i] for i in sort_order]
+        masks = [masks[i] for i in sort_order]
+        metadata = [metadata[i] for i in sort_order]
 
-        aligned_bodies.append(body_crop)
-
-        # Slice 4-5 Color Band Proposals Across Active Body
-        n_bands = 4
-        win_w = max(16, bw // n_bands)
-        for b_idx in range(n_bands):
-            wx = int(b_idx * (bw - win_w) / max(1, n_bands - 1))
-            band_patch = body_crop[:, wx:wx + win_w]
-            band_m_patch = body_m[:, wx:wx + win_w]
-
-            crops.append(cv2.resize(band_patch, target_size, interpolation=cv2.INTER_AREA))
-            masks.append(cv2.resize(band_m_patch, target_size, interpolation=cv2.INTER_NEAREST))
-            metadata.append({
-                "resistor_id": idx,
-                "band_index": b_idx,
-                "window_x": wx,
-                "type": "resistor_band",
-            })
-
-    return crops, masks, metadata, {"aligned_bodies": aligned_bodies}
-
-
-def extract_proposals(rgb_img, mask, mode="apple", extra_data=None):
-    """Unified Stage 3 entry point."""
-    if mode == "apple":
-        return extract_apple_proposals(rgb_img, mask)
-    else:
-        blobs = extra_data.get("blobs", []) if extra_data else []
-        if not blobs:
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            blobs = [c for c in contours if cv2.contourArea(c) > 1500]
-        return extract_resistor_proposals(rgb_img, mask, blobs)
+    return crops, masks, metadata
 
 
 # ==============================================================================
@@ -391,12 +476,15 @@ def extract_proposals(rgb_img, mask, mode="apple", extra_data=None):
 
 def extract_95d_features(crop_rgb, crop_mask=None):
     """
-    Extracts the unified 95D feature vector for any candidate crop:
-      - 32 Colour Features: 20 statistical moments + 12 histogram bins across H, S, a*, b*, I.
-      - 59 Texture Features: Uniform LBP (P=8, R=1, method='uniform').
-      - 4 Shape Metrics: Circularity, Solidity, Aspect Ratio, Extent.
+    Universal Stage 4 Feature Extraction function:
+      Extracts a comprehensive 95D descriptor vector for any candidate 64x64 proposal:
+        1. 32 Colour Features: 20 statistical moments (mean, std, skewness, kurtosis across
+           H, S, a*, b*, and Intensity I) + 12 histogram bins (4 bins each for H, S, a*).
+        2. 59 Texture Features: Rotation-invariant Uniform Local Binary Patterns (P=8, R=1, 'uniform').
+        3. 4 Shape Metrics: Circularity, Solidity, Aspect Ratio, and Extent.
+      Asserts exact 95D dimensionality.
     """
-    # 1. Colour Features (32D)
+    # 1. Colour Descriptors (32D)
     hsv = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2HSV)
     lab = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2LAB)
     h_ch, s_ch, _ = cv2.split(hsv)
@@ -419,13 +507,13 @@ def extract_95d_features(crop_rgb, crop_mask=None):
     a_hist, _ = np.histogram(a_ch.ravel(), bins=4, range=(0, 256), density=True)
     colour_feats = np.concatenate([moments, h_hist, s_hist, a_hist]).astype(np.float32)
 
-    # 2. Texture Features (59D Uniform LBP)
+    # 2. Texture Descriptors (59D Uniform LBP)
     gray = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2GRAY)
     lbp_map = local_binary_pattern(gray, P=8, R=1, method="uniform")
     texture_feats, _ = np.histogram(lbp_map.ravel(), bins=59, range=(0, 59), density=True)
     texture_feats = texture_feats.astype(np.float32)
 
-    # 3. Shape Metrics (4D)
+    # 3. Shape Descriptors (4D)
     if crop_mask is None:
         _, crop_mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
@@ -451,7 +539,10 @@ def extract_95d_features(crop_rgb, crop_mask=None):
 
 
 def fit_scaler_and_pca(X_train, X_val=None, n_components=0.95):
-    """Fits StandardScaler and PCA on training split only to prevent data leakage."""
+    """
+    Fits StandardScaler and PCA on the training split only to prevent data leakage.
+    Projects feature vectors into principal subspace capturing >= 95% variance.
+    """
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
 
@@ -466,18 +557,21 @@ def fit_scaler_and_pca(X_train, X_val=None, n_components=0.95):
 
 
 # ==============================================================================
-# UNIFIED PIPELINE RUNNER & REPORT GENERATOR
+# BATCH HARVESTING & PIPELINE EXECUTION
 # ==============================================================================
 
-def harvest_dataset_proposals(files, mode="apple", max_images=5):
-    """Gathers crops and masks from multiple dataset images for robust PCA fitting."""
+def harvest_proposals_from_files(files, max_images=5, target_size=(64, 64)):
+    """
+    Harvests candidate crops and masks across multiple dataset images using
+    the universal processing functions for robust batch PCA fitting.
+    """
     all_crops, all_masks = [], []
     for f in files[:max_images]:
         try:
-            img = load_normalized_image(f)
-            clean, _, _, _, _, _, _ = preprocess_image(img, mode=mode)
-            mask, extra = segment_foreground(clean, mode=mode)
-            crops, masks, _, _ = extract_proposals(clean, mask, mode=mode, extra_data=extra)
+            raw_rgb = load_normalized_image(f)
+            clean_rgb, _, _, _, _, _, _ = preprocess_image(raw_rgb)
+            mask, _, _ = segment_foreground(clean_rgb)
+            crops, masks, _ = extract_proposals(clean_rgb, mask, target_size=target_size)
             all_crops.extend(crops)
             all_masks.extend(masks)
         except Exception:
@@ -485,99 +579,143 @@ def harvest_dataset_proposals(files, mode="apple", max_images=5):
     return all_crops, all_masks
 
 
-def run_pipeline(mode="both"):
+def create_proposal_montage(crops, max_show=10, border_px=2):
     """
-    Executes the unified end-to-end Machine Vision pipeline (Stages 1 through 4)
-    across Apples and Resistors, logging metrics and saving summary figures.
+    Creates a clean 2D grid montage of proposal crops with distinct borders
+    for clear, professional diagnostic visualization.
     """
-    print("=" * 65)
+    if not crops:
+        return None
+    n_show = min(len(crops), max_show)
+    selected = crops[:n_show]
+    h, w = selected[0].shape[:2]
+
+    n_cols = 5
+    n_rows = (n_show + n_cols - 1) // n_cols
+
+    montage_h = n_rows * (h + border_px) + border_px
+    montage_w = n_cols * (w + border_px) + border_px
+    montage = np.ones((montage_h, montage_w, 3), dtype=np.uint8) * 240
+
+    for idx, c in enumerate(selected):
+        r = idx // n_cols
+        col = idx % n_cols
+        y = border_px + r * (h + border_px)
+        x = border_px + col * (w + border_px)
+        montage[y:y+h, x:x+w] = c
+
+    return montage
+
+
+def run_pipeline(target_dataset="both", custom_image=None):
+    """
+    Executes the unified end-to-end Machine Vision pipeline across Stages 1 to 4.
+    Runs the exact same universal functions without class-specific branching.
+    """
+    print("=" * 70)
     print("Machine Vision (UFMFRR-15-M) - Unified Pipeline (Stages 1 - 4)")
     print("Author: Jakub Wrzyszcz")
-    print("=" * 65)
+    print("=" * 70)
 
     os.makedirs("output", exist_ok=True)
-    tasks = ["apple", "resistor"] if mode == "both" else [mode]
 
-    for task in tasks:
-        print(f"\n>>> EXECUTING PIPELINE FOR: {task.upper()} <<<")
-        files = resolve_dataset_files(task)
+    if custom_image:
+        targets = [("custom", [custom_image])]
+    elif target_dataset == "both":
+        targets = [
+            ("apple", resolve_dataset_files("apple")),
+            ("resistor", resolve_dataset_files("resistor")),
+        ]
+    else:
+        targets = [(target_dataset, resolve_dataset_files(target_dataset))]
+
+    for tag, files in targets:
+        print(f"\n>>> PROCESSING DOMAIN: {tag.upper()} <<<")
         if not files:
-            print(f"[ERROR] No dataset files found for {task}.")
+            print(f"[ERROR] No image files found for {tag}.")
             continue
 
         sample_file = files[0]
         raw_rgb = load_normalized_image(sample_file)
-        print(f"Sample Image: {os.path.basename(sample_file)} (Shape: {raw_rgb.shape})")
+        print(f"Sample Image: {os.path.basename(sample_file)} (Resolution: {raw_rgb.shape})")
 
-        # Stage 1: Preprocessing
+        # Stage 1: Universal Preprocessing
         t0 = time.perf_counter()
-        clean_rgb, h, s, v, i_chan, l_raw, l_eq = preprocess_image(raw_rgb, mode=task)
+        clean_rgb, h, s, v, i_chan, l_raw, l_eq = preprocess_image(raw_rgb)
         t_stage1 = (time.perf_counter() - t0) * 1000.0
         print(f"  [Stage 1] Preprocessing complete in {t_stage1:.2f} ms")
 
-        # Stage 2: Segmentation
+        # Stage 2: Universal Foreground Segmentation
         t1 = time.perf_counter()
-        mask, seg_extra = segment_foreground(clean_rgb, mode=task)
+        mask, seg_info, contours = segment_foreground(clean_rgb)
         t_stage2 = (time.perf_counter() - t1) * 1000.0
-        if task == "apple":
-            t_km0 = time.perf_counter()
-            mask_km, _ = benchmark_apple_kmeans(clean_rgb, k=3)
-            t_km = (time.perf_counter() - t_km0) * 1000.0
-            print(f"  [Stage 2] Otsu: {t_stage2:.2f} ms | K-Means: {t_km:.2f} ms (Speedup: {t_km/t_stage2:.1f}x)")
-        else:
-            n_blobs = len(seg_extra.get("blobs", []))
-            print(f"  [Stage 2] Adaptive Thresholding & 5x5 Closing: {t_stage2:.2f} ms ({n_blobs} bodies)")
 
-        # Stage 3: Proposals
+        # Benchmark against cv2.kmeans clustering
+        t_km0 = time.perf_counter()
+        cluster_mask, _ = benchmark_clustering(clean_rgb, k=3)
+        t_km = (time.perf_counter() - t_km0) * 1000.0
+        print(f"  [Stage 2] {seg_info['method'].capitalize()} ({len(contours)} blobs): {t_stage2:.2f} ms | "
+              f"K-Means (k=3): {t_km:.2f} ms (Speedup: {t_km/t_stage2:.1f}x)")
+
+        # Stage 3: Universal Shape-Adaptive Proposal Generation
         t2 = time.perf_counter()
-        sample_crops, sample_masks, meta, prop_extra = extract_proposals(
-            clean_rgb, mask, mode=task, extra_data=seg_extra
-        )
+        sample_crops, sample_masks, metadata = extract_proposals(clean_rgb, mask)
         t_stage3 = (time.perf_counter() - t2) * 1000.0
         print(f"  [Stage 3] Extracted {len(sample_crops)} normalized 64x64 proposals in {t_stage3:.2f} ms")
 
-        # Stage 4: Feature Extraction & PCA Fitting on Batch
-        print("  [Stage 4] Harvesting batch proposals for PCA fitting...")
-        batch_crops, batch_masks = harvest_dataset_proposals(files, mode=task, max_images=5)
-        print(f"  [Stage 4] Assembled {len(batch_crops)} proposals. Extracting 95D feature vectors...")
+        # Stage 4: Universal 95D Feature Extraction & PCA Fitting
+        print("  [Stage 4] Harvesting proposals across dataset batch for PCA fitting...")
+        batch_crops, batch_masks = harvest_proposals_from_files(files, max_images=5)
+        if len(batch_crops) < 10:
+            batch_crops.extend(sample_crops)
+            batch_masks.extend(sample_masks)
 
+        print(f"  [Stage 4] Assembled {len(batch_crops)} candidate proposals. Extracting 95D feature vectors...")
         X = np.array([extract_95d_features(c, m) for c, m in zip(batch_crops, batch_masks)], dtype=np.float32)
-        X_train, X_val = train_test_split(X, test_size=0.20, random_state=42)
+
+        test_size = 0.20 if len(X) >= 10 else 0.0
+        if test_size > 0:
+            X_train, X_val = train_test_split(X, test_size=test_size, random_state=42)
+        else:
+            X_train, X_val = X, None
+
         scaler, pca, X_train_pca, X_val_pca = fit_scaler_and_pca(X_train, X_val, n_components=0.95)
 
         n_pca = pca.n_components_
         cum_var = np.cumsum(pca.explained_variance_ratio_)
         compression = (1.0 - n_pca / 95.0) * 100.0
-        print(f"  [Stage 4] PCA: 95D -> {n_pca}D ({compression:.1f}% reduction, {cum_var[-1]*100:.2f}% variance)")
+        print(f"  [Stage 4] PCA: 95D -> {n_pca}D ({compression:.1f}% dimensionality reduction, "
+              f"{cum_var[-1]*100:.2f}% explained variance retained)")
 
-        # 4-Panel Summary Diagnostic Visualisation
+        # ----------------------------------------------------------------------
+        # 4-Panel Diagnostic Figure
+        # ----------------------------------------------------------------------
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-        # (a) Stage 1
+        # (a) Stage 1 Preprocessed Image
         axes[0, 0].imshow(clean_rgb)
-        axes[0, 0].set_title(f"(a) Stage 1: Preprocessed {task.capitalize()} (CLAHE + Denoise)")
+        axes[0, 0].set_title(f"(a) Stage 1: Preprocessed Image (CLAHE + Spatial Filter)")
         axes[0, 0].axis("off")
 
-        # (b) Stage 2
+        # (b) Stage 2 Binary Foreground Mask
         axes[0, 1].imshow(mask, cmap="gray")
-        axes[0, 1].set_title(f"(b) Stage 2: Binary Segmentation Mask ({task.capitalize()})")
+        axes[0, 1].set_title(f"(b) Stage 2: Binary Foreground Mask ({seg_info['method']})")
         axes[0, 1].axis("off")
 
-        # (c) Stage 3
+        # (c) Stage 3 Standardized 64x64 Proposals Montage
         axes[1, 0].axis("off")
-        n_show = min(len(sample_crops), 10)
-        if n_show > 0:
-            strip = np.hstack([sample_crops[i] for i in range(n_show)])
-            axes[1, 0].imshow(strip)
-            axes[1, 0].set_title(f"(c) Stage 3: Standardized 64x64 Proposals ({n_show} shown)")
+        montage = create_proposal_montage(sample_crops, max_show=10)
+        if montage is not None:
+            axes[1, 0].imshow(montage)
+            axes[1, 0].set_title(f"(c) Stage 3: Standardized 64x64 Proposals ({min(len(sample_crops), 10)} shown)")
         else:
-            axes[1, 0].text(0.5, 0.5, "No proposals extracted", ha="center")
+            axes[1, 0].text(0.5, 0.5, "No proposals extracted", ha="center", va="center")
 
-        # (d) Stage 4
+        # (d) Stage 4 PCA Scree Plot
         axes[1, 1].plot(range(1, len(cum_var) + 1), cum_var, "o-", color="navy", linewidth=2)
         axes[1, 1].axhline(0.95, color="crimson", linestyle="--", label="95% Variance Threshold")
         axes[1, 1].axvline(n_pca, color="green", linestyle=":", label=f"Retained ({n_pca}D)")
-        axes[1, 1].set_title(f"(d) Stage 4 PCA Scree Plot: 95D -> {n_pca}D ({cum_var[-1]*100:.1f}%)")
+        axes[1, 1].set_title(f"(d) Stage 4: PCA Scree Plot (95D -> {n_pca}D, {cum_var[-1]*100:.1f}%)")
         axes[1, 1].set_xlabel("Principal Components")
         axes[1, 1].set_ylabel("Cumulative Explained Variance")
         axes[1, 1].set_ylim(0, 1.05)
@@ -585,7 +723,7 @@ def run_pipeline(mode="both"):
         axes[1, 1].legend()
 
         plt.tight_layout()
-        out_fig = os.path.join("output", f"pipeline_{task}_summary.png")
+        out_fig = os.path.join("output", f"pipeline_{tag}_summary.png")
         plt.savefig(out_fig, dpi=200, bbox_inches="tight")
 
         try:
@@ -597,12 +735,19 @@ def run_pipeline(mode="both"):
         except Exception:
             plt.close()
 
-        print(f"  -> Saved summary visualization: {out_fig}")
+        print(f"  -> Saved diagnostic figure: {out_fig}")
 
-    print("\n" + "=" * 65)
-    print("Unified Pipeline successfully executed across both tasks!")
-    print("=" * 65)
+    print("\n" + "=" * 70)
+    print("Unified Pipeline successfully executed across all domains!")
+    print("=" * 70)
 
 
 if __name__ == "__main__":
-    run_pipeline()
+    parser = argparse.ArgumentParser(description="Machine Vision Unified Counting Pipeline (Stages 1 to 4)")
+    parser.add_argument("--mode", type=str, default="both", choices=["both", "apple", "resistor"],
+                        help="Dataset domain to process: 'both', 'apple', or 'resistor'")
+    parser.add_argument("--image", type=str, default=None,
+                        help="Path to an optional custom input image")
+    args = parser.parse_args()
+
+    run_pipeline(target_dataset=args.mode, custom_image=args.image)
