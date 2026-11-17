@@ -46,7 +46,7 @@ Architectural Overview (Appendix A & Section 2.1 Formulation):
   Stage 4: Unified 95D Feature Extraction & Dimensionality Reduction (Units 2, 4, 6, 7)
     - 32 Colour Descriptors: 20 statistical moments (mean, std, skewness, kurtosis across H, S, a*, b*, I)
       and 12 histogram bins (4 bins each for H, S, a*).
-    - 59 Texture Descriptors: Rotation-invariant Uniform Local Binary Patterns (P=8, R=1, method='uniform').
+    - 59 Texture Descriptors: Non-Rotation-Invariant Uniform Local Binary Patterns (P=8, R=1, method='nri_uniform').
     - 4 Invariant Shape Metrics: Circularity, Solidity, Aspect Ratio, and Extent.
     - Dimensionality Reduction: StandardScaler and PCA(n_components=0.95) fit strictly on the
       training split to prevent data leakage, evaluating cumulative explained variance.
@@ -480,7 +480,7 @@ def extract_95d_features(crop_rgb, crop_mask=None):
       Extracts a comprehensive 95D descriptor vector for any candidate 64x64 proposal:
         1. 32 Colour Features: 20 statistical moments (mean, std, skewness, kurtosis across
            H, S, a*, b*, and Intensity I) + 12 histogram bins (4 bins each for H, S, a*).
-        2. 59 Texture Features: Rotation-invariant Uniform Local Binary Patterns (P=8, R=1, 'uniform').
+        2. 59 Texture Features: Non-Rotation-Invariant Uniform Local Binary Patterns (P=8, R=1, 'nri_uniform').
         3. 4 Shape Metrics: Circularity, Solidity, Aspect Ratio, and Extent.
       Asserts exact 95D dimensionality.
     """
@@ -509,7 +509,7 @@ def extract_95d_features(crop_rgb, crop_mask=None):
 
     # 2. Texture Descriptors (59D Uniform LBP)
     gray = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2GRAY)
-    lbp_map = local_binary_pattern(gray, P=8, R=1, method="uniform")
+    lbp_map = local_binary_pattern(gray, P=8, R=1, method="nri_uniform")
     texture_feats, _ = np.histogram(lbp_map.ravel(), bins=59, range=(0, 59), density=True)
     texture_feats = texture_feats.astype(np.float32)
 
@@ -655,7 +655,7 @@ def run_pipeline(target_dataset="both", custom_image=None):
         cluster_mask, _ = benchmark_clustering(clean_rgb, k=3)
         t_km = (time.perf_counter() - t_km0) * 1000.0
         print(f"  [Stage 2] {seg_info['method'].capitalize()} ({len(contours)} blobs): {t_stage2:.2f} ms | "
-              f"K-Means (k=3): {t_km:.2f} ms (Speedup: {t_km/t_stage2:.1f}x)")
+              f"K-Means (k=3): {t_km:.2f} ms (Speedup: {t_km/max(t_stage2, 0.001):.1f}x)")
 
         # Stage 3: Universal Shape-Adaptive Proposal Generation
         t2 = time.perf_counter()
@@ -671,6 +671,9 @@ def run_pipeline(target_dataset="both", custom_image=None):
             batch_masks.extend(sample_masks)
 
         print(f"  [Stage 4] Assembled {len(batch_crops)} candidate proposals. Extracting 95D feature vectors...")
+        if len(batch_crops) == 0:
+            print(f"  [WARN] No proposals extracted for {tag}. Skipping Stage 4 PCA.")
+            continue
         X = np.array([extract_95d_features(c, m) for c, m in zip(batch_crops, batch_masks)], dtype=np.float32)
 
         test_size = 0.20 if len(X) >= 10 else 0.0
