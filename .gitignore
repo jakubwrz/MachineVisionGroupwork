@@ -58,3 +58,6 @@ output/
 .env.*
 secrets.json
 roboflow_key.txt
+
+# Scratch scripts
+scratch/
