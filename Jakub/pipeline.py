@@ -3,62 +3,6 @@ Machine Vision (UFMFRR-15-M) - Group Portfolio Project
 Unified End-to-End Object Counting Pipeline: Stages 1 to 5
 
 Primary Contributor: Jakub Wrzyszcz
-
-Architectural Overview (Appendix A & Section 2.1 Formulation):
-  This pipeline implements a single coherent computer vision framework addressing object
-  counting across contrasting image domains (orchard fruit counting and resistor colour-band
-  counting). In accordance with the assessment brief, all processing stages are formulated
-  using universal computer vision functions that adapt automatically based on optical,
-  radiometric, and geometric principles:
-
-  Stage 1: Universal Radiometric & Spatial Preprocessing (Units 2, 4, 5)
-    - Decoupled Luminance Normalisation: Converts RGB to CIE LAB, applying Contrast Limited
-      Adaptive Histogram Equalisation (CLAHE) on the L-channel to standardise local contrast
-      without chromatic distortion.
-    - Spatial Denoising: Applies a 3x3 median filter for impulse/specular noise suppression,
-      followed by Gaussian smoothing (3x3, sigma=0.8).
-    - Multi-Space Decomposition: Extracts Unit 2 Intensity I = (R+G+B)/3, HSV, and LAB channels.
-
-  Stage 2: Universal Foreground Segmentation & Clustering Benchmark (Units 3, 4)
-    - Scene-Adaptive Contrast Binarisation: Adapts based on ambient background illumination
-      (L_bg): inverted adaptive Gaussian thresholding for bright inspection backgrounds
-      (L_bg > 150), vs. chromatic saliency fusion (CIE LAB a* red and b* yellow chroma with
-      HSV S) binarised via Otsu's optimal threshold for natural canopy (L_bg <= 150).
-    - Morphological Regularisation: Applies 5x5 closing (cv2.MORPH_CLOSE) and topological
-      hole-filling to eliminate interior specular voids and bridge colour bands.
-    - Unsupervised Benchmark: Benchmarks thresholding against cv2.kmeans (k=3) in 3D (S, a*, b*).
-
-  Stage 3: Shape-Adaptive Morphological Proposal Generation (Unit 4)
-    - Universal Geometric Decomposition: Inspects candidate connected component aspect ratios:
-        * Radial / Compact (Aspect Ratio < 3.0): Applies Euclidean Distance Transform (L2) and
-          marker-controlled Watershed segmentation to split touching spherical clusters,
-          exporting standardized 64x64 proposals ranked by circularity and chromatic confidence.
-        * Axial / Elongated (Aspect Ratio >= 3.0): Determines principal orientation via minimum-area
-          bounding box, aligns horizontally via affine warp, strips thin wire leads using transverse
-          column thickness profiling, and slices standardized 64x64 candidate proposals using an
-          overlapping 1D sliding window and vertical Sobel G_x gradient energy profiling.
-
-  Stage 4: Unified 95D Feature Extraction & Dimensionality Reduction (Units 2, 4, 6, 7)
-    - 32 Colour Descriptors: 20 statistical moments (mean, std, skewness, kurtosis across H, S, a*,
-      b*, I) + 12 histogram bins (4 bins each for H, S, a*), calculated strictly inside the
-      foreground mask to eliminate background bias.
-    - 59 Texture Descriptors: Non-Rotation-Invariant Uniform Local Binary Patterns (P=8, R=1,
-      method='nri_uniform'), populating all 59 discrete pattern bins.
-    - 4 Invariant Shape Metrics: Circularity, Solidity, Aspect Ratio, and Extent.
-    - Dimensionality Reduction: StandardScaler and PCA(n_components=0.95) fit strictly on the
-      training split to prevent data leakage.
-
-  Stage 5: Machine Learning, Non-Maximum Suppression & Object Counting (Units 7, 8)
-    - Multi-Model Classifier Benchmark: Evaluates k-Nearest Neighbors (k-NN), Support Vector
-      Machine (SVM with RBF kernel), and Random Forest on PCA feature representations.
-    - Spatial 2D Non-Maximum Suppression: Suppresses overlapping fruit proposals (IoU >= 0.35).
-    - Axial 1D Non-Maximum Suppression: Groups consecutive identical non-bare colour predictions
-      along the cylinder axis, localizing discrete bands at peak confidence positions.
-    - Quantitative Counting Evaluation:
-        * Apple Counting: Compares predicted counts vs COCO ground-truth annotations, computing
-          Mean Absolute Error (MAE), Root Mean Squared Error (RMSE), Precision, Recall, and F1.
-        * Resistor Decoding: Outputs ordered band sequences, per-colour band dictionaries, and
-          calculates nominal resistance in Ohms and tolerance percentages.
 """
 
 import os
@@ -88,10 +32,7 @@ from sklearn.metrics import (
 # ==============================================================================
 
 def resolve_dataset_files(target="apple"):
-    """
-    Finds image file paths for either MinneApple or Resistor Dataset.
-    Supports local workspace folders and Google Colab default paths.
-    """
+    """Finds image file paths for either MinneApple or Resistor Dataset."""
     if target == "apple":
         patterns = [
             "minneapple-1-1/train/*.jpg",
@@ -116,10 +57,7 @@ def resolve_dataset_files(target="apple"):
 
 
 def load_normalized_image(img_path, max_dim=1280):
-    """
-    Loads an image from disk, normalizes maximum spatial dimension to preserve
-    aspect ratio without excessive memory consumption, and converts BGR to RGB.
-    """
+    """Loads an image, standardizes max dimension, and converts BGR to RGB."""
     bgr = cv2.imread(img_path)
     if bgr is None:
         raise FileNotFoundError(f"Could not load image at path: {img_path}")
@@ -131,13 +69,8 @@ def load_normalized_image(img_path, max_dim=1280):
 
 
 def load_coco_annotations(json_path="minneapple-1-1/train/_annotations.coco.json"):
-    """
-    Loads COCO ground truth bounding boxes and per-image object counts.
-    Returns:
-        img_filename_to_boxes: dict mapping image filename to list of [x, y, w, h] boxes.
-    """
+    """Loads COCO ground-truth [x, y, w, h] bounding boxes mapped by filename."""
     if not os.path.exists(json_path):
-        # Search alternate locations
         alt = glob.glob("**/_annotations.coco.json", recursive=True)
         if alt:
             json_path = alt[0]
@@ -164,23 +97,12 @@ def load_coco_annotations(json_path="minneapple-1-1/train/_annotations.coco.json
 # ==============================================================================
 
 def compute_intensity(rgb_img):
-    """
-    Computes true Unit 2 Intensity: I = (R + G + B) / 3.
-    """
+    """Computes Unit 2 Intensity: I = (R + G + B) / 3."""
     return np.mean(rgb_img.astype(np.float32), axis=2).astype(np.uint8)
 
 
 def preprocess_image(rgb_img, clahe_clip=2.0, grid_size=(8, 8), median_k=3, gauss_sigma=0.8):
-    """
-    Universal Stage 1 Preprocessing function applicable to any RGB input image:
-      1. Converts RGB to CIE LAB color space.
-      2. Applies CLAHE exclusively on the luminance (L) channel to normalize
-         uneven illumination while preserving chromaticity without color shifts.
-      3. Converts back to RGB and applies spatial filtering: a 3x3 median blur
-         for impulse noise suppression, followed by Gaussian smoothing (sigma=0.8).
-      4. Extracts multi-space representations: HSV (H, S, V), LAB, and Intensity I.
-    """
-    # 1. CLAHE on Luminance (LAB L-channel)
+    """Applies LAB L-channel CLAHE, RGB median/Gaussian denoising, and channel extraction."""
     lab = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2LAB)
     l_raw, a_chan, b_chan = cv2.split(lab)
 
@@ -188,11 +110,9 @@ def preprocess_image(rgb_img, clahe_clip=2.0, grid_size=(8, 8), median_k=3, gaus
     l_eq = clahe.apply(l_raw)
     eq_rgb = cv2.cvtColor(cv2.merge([l_eq, a_chan, b_chan]), cv2.COLOR_LAB2RGB)
 
-    # 2. Spatial Noise Reduction
     denoised_rgb = cv2.medianBlur(eq_rgb, median_k)
     clean_rgb = cv2.GaussianBlur(denoised_rgb, (3, 3), gauss_sigma)
 
-    # 3. Channel Representations
     hsv = cv2.cvtColor(clean_rgb, cv2.COLOR_RGB2HSV)
     h, s, v = cv2.split(hsv)
     i_chan = compute_intensity(clean_rgb)
@@ -205,22 +125,10 @@ def preprocess_image(rgb_img, clahe_clip=2.0, grid_size=(8, 8), median_k=3, gaus
 # ==============================================================================
 
 def segment_foreground(rgb_img, method="auto", min_area=80):
-    """
-    Universal Stage 2 Foreground Segmentation function:
-      Adapts based on optical background illumination (L_bg):
-        - High-Luminance Backgrounds (L_bg > 150, e.g. bright workbench / paper):
-          Uses inverted adaptive Gaussian thresholding (block size 101, C=15)
-          to isolate dark component bodies and leads against bright backgrounds.
-        - Natural / Low-Luminance Backgrounds (L_bg <= 150, e.g. orchard canopy):
-          Uses chromatic contrast fusion (CIE LAB a* red and b* yellow chroma with HSV S)
-          to separate fruits from foliage, binarized via Otsu's threshold.
-      Followed by 5x5 morphological closing (cv2.MORPH_CLOSE) to bridge internal
-      discontinuities (such as colour bands) and topological hole-filling to form solid masks.
-    """
+    """Scene-adaptive foreground segmentation followed by 5x5 closing and hole filling."""
     lab = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2LAB)
     l_chan = lab[:, :, 0]
 
-    # Sample border pixels to determine ambient background luminance level
     border = np.concatenate([l_chan[0, :], l_chan[-1, :], l_chan[:, 0], l_chan[:, -1]])
     bg_L = float(np.median(border))
 
@@ -239,7 +147,6 @@ def segment_foreground(rgb_img, method="auto", min_area=80):
         b_chan = lab[:, :, 2].astype(np.float32)
         s_chan = hsv[:, :, 1].astype(np.float32)
 
-        # Fruit chromatic contrast: red chroma (a* > 124) + yellow chroma (b* > 138) weighted by saturation S
         fruit_chroma = np.maximum(a_chan - 124.0, 0.0) + np.maximum(b_chan - 138.0, 0.0)
         saliency = fruit_chroma * (s_chan / 255.0)
         saliency_norm = cv2.normalize(saliency, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
@@ -247,16 +154,13 @@ def segment_foreground(rgb_img, method="auto", min_area=80):
         thresh_val, raw_binary = cv2.threshold(saliency_norm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         debug_info = {"method": "otsu_chroma_fusion", "thresh_val": thresh_val, "bg_L": bg_L}
 
-    # Morphological closing (5x5) to bridge internal gaps and dark colour bands
     kernel_5x5 = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     closed = cv2.morphologyEx(raw_binary, cv2.MORPH_CLOSE, kernel_5x5, iterations=3)
 
-    # Topological hole filling to guarantee solid candidate object masks
     contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     filled = np.zeros_like(closed)
     cv2.drawContours(filled, contours, -1, 255, thickness=cv2.FILLED)
 
-    # Filter noise blobs below minimum area threshold
     clean_mask = np.zeros_like(filled)
     valid_contours = []
     for c in contours:
@@ -268,12 +172,7 @@ def segment_foreground(rgb_img, method="auto", min_area=80):
 
 
 def benchmark_clustering(rgb_img, k=3):
-    """
-    Universal Unsupervised Clustering Benchmark (cv2.kmeans):
-      Clusters image pixels in 3D (S, a*, b*) colour feature space to partition
-      foreground from background, benchmarking execution time and segmentation
-      fidelity against thresholding.
-    """
+    """Clusters pixels in 3D (S, a*, b*) space using cv2.kmeans for benchmarking."""
     lab = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2LAB)
     hsv = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2HSV)
 
@@ -298,28 +197,15 @@ def benchmark_clustering(rgb_img, k=3):
 
 def extract_proposals(rgb_img, binary_mask, target_size=(64, 64), min_area=50):
     """
-    Universal Stage 3 Proposal Generation function:
-      Inspects the intrinsic aspect ratio (major / minor axis) of each connected component:
-        - Radial / Compact Morphology (Aspect Ratio < 3.0):
-            Applies Euclidean Distance Transform (L2) and marker-controlled Watershed
-            segmentation to split clustered spherical objects (e.g. orchard fruit),
-            exporting standardized 64x64 candidate crops ranked by shape confidence.
-        - Axial / Elongated Morphology (Aspect Ratio >= 3.0):
-            Rotates the component horizontally via affine transformation, strips thin wire
-            leads using transverse column thickness profiling, and extracts candidate colour
-            band proposals across the active ceramic body using an overlapping 1D sliding
-            window and vertical Sobel G_x gradient profiling (adapting to 3, 4, 5, or 6 bands).
-      Returns:
-        crops: List of 64x64 RGB candidate crops.
-        masks: List of corresponding 64x64 binary masks.
-        metadata: List of diagnostic dictionaries with bounding boxes, positions, and morphology types.
+    Universal Stage 3 Proposal Generator:
+      - Aspect Ratio < 3.0 (Radial): Distance Transform + Watershed cluster splitting.
+      - Aspect Ratio >= 3.0 (Axial): Affine pose alignment, lead stripping, and 1D sliding window.
     """
     h_img, w_img = rgb_img.shape[:2]
     hsv = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2HSV)
     s_chan = hsv[:, :, 1]
 
     contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
     crops, masks, metadata, conf_scores = [], [], [], []
 
     for idx, c in enumerate(contours):
@@ -337,9 +223,7 @@ def extract_proposals(rgb_img, binary_mask, target_size=(64, 64), min_area=50):
         minor_len = min(l1, l2)
         aspect_ratio = major_len / (minor_len + 1e-6)
 
-        # ----------------------------------------------------------------------
-        # Case A: Radial / Compact Instances (e.g. spherical fruit / apples)
-        # ----------------------------------------------------------------------
+        # Case A: Radial / Compact Instances (e.g., orchard apples)
         if aspect_ratio < 3.0:
             comp_mask = np.zeros_like(binary_mask)
             cv2.drawContours(comp_mask, [c], -1, 255, thickness=cv2.FILLED)
@@ -356,10 +240,10 @@ def extract_proposals(rgb_img, binary_mask, target_size=(64, 64), min_area=50):
 
             num_markers, markers = cv2.connectedComponents(sure_fg)
             if num_markers <= 1:
-                # Single isolated compact instance
                 M = cv2.moments(comp_mask)
                 if M["m00"] > 0:
                     cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
+                    tx, ty, tw, th = cv2.boundingRect(c)
                     side = int(np.clip(max(major_len * 1.1, 48), 48, 120))
                     hs = side // 2
                     x1, x2 = max(0, cx - hs), min(w_img, cx + hs)
@@ -377,12 +261,11 @@ def extract_proposals(rgb_img, binary_mask, target_size=(64, 64), min_area=50):
                         metadata.append({
                             "type": "radial_single",
                             "centroid": (cx, cy),
-                            "bbox": [x1, y1, x2 - x1, y2 - y1],
+                            "bbox": [tx, ty, tw, th],  # Tight contour bbox for accurate COCO IoU matching
                             "aspect_ratio": aspect_ratio,
                             "area": int(M["m00"]),
                         })
             else:
-                # Touching cluster: resolve via marker-controlled watershed
                 markers = markers + 1
                 markers[unknown == 255] = 0
                 markers = cv2.watershed(rgb_img.copy(), markers)
@@ -397,8 +280,8 @@ def extract_proposals(rgb_img, binary_mask, target_size=(64, 64), min_area=50):
                     if M["m00"] == 0:
                         continue
                     cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
-                    x, y, w, h = cv2.boundingRect(inst_m)
-                    side = int(np.clip(max(w, h), 48, 120))
+                    tx, ty, tw, th = cv2.boundingRect(inst_m)
+                    side = int(np.clip(max(tw, th), 48, 120))
                     hs = side // 2
                     x1, x2 = max(0, cx - hs), min(w_img, cx + hs)
                     y1, y2 = max(0, cy - hs), min(h_img, cy + hs)
@@ -419,24 +302,21 @@ def extract_proposals(rgb_img, binary_mask, target_size=(64, 64), min_area=50):
                         metadata.append({
                             "type": "radial_watershed",
                             "centroid": (cx, cy),
-                            "bbox": [x1, y1, x2 - x1, y2 - y1],
+                            "bbox": [tx, ty, tw, th],  # Tight Watershed instance bbox for COCO IoU matching
                             "aspect_ratio": aspect_ratio,
                             "area": int(inst_area),
                         })
 
-        # ----------------------------------------------------------------------
-        # Case B: Axial / Elongated Instances (e.g. cylindrical resistors with leads)
-        # ----------------------------------------------------------------------
+        # Case B: Axial / Elongated Instances (e.g., cylindrical resistors)
         else:
             long_vec = e1 if l1 >= l2 else e2
             if major_len < 80 or minor_len < 8:
                 continue
 
-            # Compute orientation of the major axis
             angle = float(np.degrees(np.arctan2(long_vec[1], long_vec[0])))
             cx, cy = rect[0]
+            orig_x, orig_y, orig_w, orig_h = cv2.boundingRect(c)
 
-            # Rotate component so the major cylindrical axis is strictly horizontal
             M_rot = cv2.getRotationMatrix2D((cx, cy), angle, 1.0)
             rot_img = cv2.warpAffine(
                 rgb_img, M_rot, (w_img, h_img), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
@@ -456,7 +336,6 @@ def extract_proposals(rgb_img, binary_mask, target_size=(64, 64), min_area=50):
             if cw < 50:
                 continue
 
-            # Strip thin wire leads: body exhibits significantly higher transverse thickness
             col_thick = np.sum(c_mask > 0, axis=0)
             smooth_thick = np.convolve(col_thick, np.ones(21) / 21.0, mode="same")
             c_start, c_end = int(cw * 0.25), int(cw * 0.75)
@@ -468,7 +347,6 @@ def extract_proposals(rgb_img, binary_mask, target_size=(64, 64), min_area=50):
             if max_th < 15:
                 continue
 
-            # Locate ceramic body boundaries where thickness exceeds 55% of peak
             bx1 = center_pk
             while bx1 > max(0, c_start - 30) and smooth_thick[bx1] > 0.55 * max_th:
                 bx1 -= 1
@@ -479,7 +357,6 @@ def extract_proposals(rgb_img, binary_mask, target_size=(64, 64), min_area=50):
             body_crop = c_crop[:, bx1:bx2]
             body_m = c_mask[:, bx1:bx2]
 
-            # Crop tight vertical rows to eliminate background artifacts
             row_thick = np.sum(body_m > 0, axis=1)
             if len(row_thick) > 0 and row_thick.max() > 0:
                 act_rows = np.where(row_thick > 0.4 * row_thick.max())[0]
@@ -491,15 +368,17 @@ def extract_proposals(rgb_img, binary_mask, target_size=(64, 64), min_area=50):
             if bw < 25 or bh < 12:
                 continue
 
-            # Measure vertical Sobel G_x gradient energy across central 60% strip
             c_strip = body_crop[int(bh * 0.2):int(bh * 0.8), :]
             gray_strip = cv2.cvtColor(c_strip, cv2.COLOR_RGB2GRAY)
             sobel_x = cv2.Sobel(gray_strip, cv2.CV_64F, 1, 0, ksize=3)
             sobel_energy = np.mean(np.abs(sobel_x), axis=0)
 
-            # Universal Overlapping Sliding Window (adapts to 3, 4, 5, or 6 bands without hardcoding)
             win_w = max(12, int(bw * 0.12))
             step = max(6, int(win_w * 0.5))
+
+            # Estimate baseline ceramic body LAB color from the end caps
+            edge_strip = np.concatenate([body_crop[:, :max(4, win_w // 2)], body_crop[:, -max(4, win_w // 2):]], axis=1)
+            base_lab = np.median(cv2.cvtColor(edge_strip, cv2.COLOR_RGB2LAB).reshape(-1, 3), axis=0)
 
             for wx in range(0, bw - win_w, step):
                 band_p = body_crop[:, wx:wx + win_w]
@@ -517,7 +396,8 @@ def extract_proposals(rgb_img, binary_mask, target_size=(64, 64), min_area=50):
                     "sobel_score": g_score,
                     "aspect_ratio": aspect_ratio,
                     "body_shape": (bh, bw),
-                    "bbox": [x1, y1, x2 - x1, y2 - y1],
+                    "base_lab": base_lab,
+                    "bbox": [orig_x, orig_y, orig_w, orig_h],
                 })
 
     return crops, masks, metadata
@@ -528,18 +408,7 @@ def extract_proposals(rgb_img, binary_mask, target_size=(64, 64), min_area=50):
 # ==============================================================================
 
 def extract_95d_features(crop_rgb, crop_mask=None):
-    """
-    Universal Stage 4 Feature Extraction function:
-      Extracts a comprehensive 95D descriptor vector for any candidate 64x64 proposal:
-        1. 32 Colour Features: 20 statistical moments (mean, std, skewness, kurtosis across
-           H, S, a*, b*, and Intensity I) + 12 histogram bins (4 bins each for H, S, a*).
-           CRITICALLY: Evaluated strictly over foreground pixels (crop_mask > 0) to prevent
-           background foliage/lighting contamination.
-        2. 59 Texture Features: Non-Rotation-Invariant Uniform Local Binary Patterns (P=8, R=1, 'nri_uniform').
-        3. 4 Shape Metrics: Circularity, Solidity, Aspect Ratio, and Extent.
-      Asserts exact 95D dimensionality.
-    """
-    # 1. Colour Descriptors (32D) - Foreground Masked
+    """Extracts 32 foreground-masked colour features, 59 nri_uniform LBP bins, and 4 shape metrics."""
     hsv = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2HSV)
     lab = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2LAB)
     h_ch, s_ch, _ = cv2.split(hsv)
@@ -574,14 +443,13 @@ def extract_95d_features(crop_rgb, crop_mask=None):
     s_hist, _ = np.histogram(s_vals, bins=4, range=(0, 256), density=True)
     a_hist, _ = np.histogram(a_vals, bins=4, range=(0, 256), density=True)
     colour_feats = np.concatenate([moments, h_hist, s_hist, a_hist]).astype(np.float32)
+    colour_feats = np.nan_to_num(colour_feats, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # 2. Texture Descriptors (59D Non-Rotation-Invariant Uniform LBP)
     gray = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2GRAY)
     lbp_map = local_binary_pattern(gray, P=8, R=1, method="nri_uniform")
     texture_feats, _ = np.histogram(lbp_map.ravel(), bins=59, range=(0, 59), density=True)
     texture_feats = texture_feats.astype(np.float32)
 
-    # 3. Shape Descriptors (4D)
     if crop_mask is None:
         _, crop_mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
@@ -607,10 +475,7 @@ def extract_95d_features(crop_rgb, crop_mask=None):
 
 
 def fit_scaler_and_pca(X_train, X_val=None, n_components=0.95):
-    """
-    Fits StandardScaler and PCA on the training split only to prevent data leakage.
-    Projects feature vectors into principal subspace capturing >= 95% variance.
-    """
+    """Fits StandardScaler and PCA strictly on the training split."""
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
 
@@ -629,9 +494,7 @@ def fit_scaler_and_pca(X_train, X_val=None, n_components=0.95):
 # ==============================================================================
 
 def compute_box_iou(boxA, boxB):
-    """
-    Computes Intersection-over-Union (IoU) between two bounding boxes [x, y, w, h].
-    """
+    """Computes Intersection-over-Union (IoU) between two [x, y, w, h] boxes."""
     xA = max(boxA[0], boxB[0])
     yA = max(boxA[1], boxB[1])
     xB = min(boxA[0] + boxA[2], boxB[0] + boxB[2])
@@ -644,9 +507,7 @@ def compute_box_iou(boxA, boxB):
 
 
 def apply_2d_nms(boxes, scores, iou_thresh=0.35):
-    """
-    Universal 2D Non-Maximum Suppression to prevent double-counting overlapping proposals.
-    """
+    """2D Non-Maximum Suppression to eliminate overlapping detections."""
     if len(boxes) == 0:
         return []
 
@@ -682,11 +543,7 @@ def apply_2d_nms(boxes, scores, iou_thresh=0.35):
 
 
 def apply_1d_nms(slices_meta, predicted_labels, confidences, bare_class="Bare_Body"):
-    """
-    Universal 1D Non-Maximum Suppression / Run-Length Grouping for axial sequences:
-    Groups consecutive identical non-bare class predictions along the cylinder axis,
-    retaining the peak confidence detection for each discrete band.
-    """
+    """1D Non-Maximum Suppression grouping consecutive axial slices into discrete bands."""
     if not predicted_labels:
         return []
 
@@ -723,77 +580,32 @@ def apply_1d_nms(slices_meta, predicted_labels, confidences, bare_class="Bare_Bo
     return bands
 
 
-def decode_resistor_bands(bands):
+def count_resistor_bands(bands):
     """
-    Standard EIA resistor colour-code decoder. Decodes 3, 4, and 5-band resistors:
-      Returns:
-        resistance_str: Formatted string (e.g. '1.0 kΩ')
-        tolerance_str: Formatted string (e.g. '±5%')
-        counts_dict: Dictionary of colour counts (e.g. {'Brown': 1, 'Black': 1, 'Red': 1, 'Gold': 1})
+    Counts the number of colour bands of each colour present on each resistor
+    in accordance with the assessment specification.
+    Returns:
+        valid_bands: list of cleaned EIA colour strings
+        counts_dict: dictionary of counts per colour and total bands
     """
-    COLOR_DIGITS = {
-        "Black": 0, "Brown": 1, "Red": 2, "Orange": 3, "Yellow": 4,
-        "Green": 5, "Blue": 6, "Violet": 7, "Gray": 8, "White": 9
+    EIA_COLOURS = {
+        "Black", "Brown", "Red", "Orange", "Yellow",
+        "Green", "Blue", "Violet", "Gray", "White", "Gold", "Silver"
     }
-    COLOR_MULTIPLIER = {
-        "Black": 1, "Brown": 10, "Red": 100, "Orange": 1000, "Yellow": 10000,
-        "Green": 100000, "Blue": 1000000, "Violet": 10000000, "Gold": 0.1, "Silver": 0.01
-    }
-    COLOR_TOLERANCE = {
-        "Brown": "±1%", "Red": "±2%", "Green": "±0.5%", "Blue": "±0.25%",
-        "Violet": "±0.1%", "Gold": "±5%", "Silver": "±10%"
-    }
-
-    valid_bands = [b for b in bands if b in COLOR_DIGITS or b in COLOR_MULTIPLIER]
-    counts_dict = {b: valid_bands.count(b) for b in sorted(set(valid_bands))}
+    valid_bands = [str(b) for b in bands if str(b) in EIA_COLOURS]
+    counts_dict = {c: valid_bands.count(c) for c in sorted(set(valid_bands))}
     counts_dict["Total Bands"] = len(valid_bands)
-
-    if len(valid_bands) < 3:
-        return "Unknown", "N/A", counts_dict
-
-    if len(valid_bands) == 4:
-        d1 = COLOR_DIGITS.get(valid_bands[0], 0)
-        d2 = COLOR_DIGITS.get(valid_bands[1], 0)
-        mult = COLOR_MULTIPLIER.get(valid_bands[2], 1)
-        tol = COLOR_TOLERANCE.get(valid_bands[3], "±20%")
-        val = (d1 * 10 + d2) * mult
-    elif len(valid_bands) >= 5:
-        d1 = COLOR_DIGITS.get(valid_bands[0], 0)
-        d2 = COLOR_DIGITS.get(valid_bands[1], 0)
-        d3 = COLOR_DIGITS.get(valid_bands[2], 0)
-        mult = COLOR_MULTIPLIER.get(valid_bands[3], 1)
-        tol = COLOR_TOLERANCE.get(valid_bands[4], "±20%")
-        val = (d1 * 100 + d2 * 10 + d3) * mult
-    else:  # 3 bands
-        d1 = COLOR_DIGITS.get(valid_bands[0], 0)
-        d2 = COLOR_DIGITS.get(valid_bands[1], 0)
-        mult = COLOR_MULTIPLIER.get(valid_bands[2], 1)
-        tol = "±20%"
-        val = (d1 * 10 + d2) * mult
-
-    if val >= 1e6:
-        res_str = f"{val/1e6:.1f} MΩ"
-    elif val >= 1e3:
-        res_str = f"{val/1e3:.1f} kΩ"
-    else:
-        res_str = f"{val:.1f} Ω"
-
-    return res_str, tol, counts_dict
+    return valid_bands, counts_dict
 
 
 def classify_axial_slice(crop_rgb, base_lab=None):
-    """
-    Universal Color Band Classifier for axial proposal slices:
-    Classifies a 64x64 slice into one of the 13 classes (12 EIA colours + Bare_Body)
-    using calibrated multi-space (LAB, HSV, RGB) colorimetry.
-    """
+    """Assigns reference EIA colour labels (12 colours + Bare_Body) to axial slices."""
     w_lab = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2LAB)
     w_hsv = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2HSV)
     med_lab = np.median(w_lab.reshape(-1, 3), axis=0)
     med_hsv = np.median(w_hsv.reshape(-1, 3), axis=0)
     med_rgb = np.median(crop_rgb.reshape(-1, 3), axis=0)
 
-    # Bare ceramic body check relative to component baseline
     if base_lab is not None:
         delta_e = float(np.linalg.norm(med_lab - base_lab))
         if delta_e < 18.0:
@@ -803,7 +615,6 @@ def classify_axial_slice(crop_rgb, base_lab=None):
     L, a, b = med_lab
     I = float(np.mean(med_rgb))
 
-    # EIA Standard Color Rules
     if b > 140 and a > 126 and s > 35 and 60 < I < 145:
         if 15 <= h <= 35:
             return "Gold", float(b / 255.0)
@@ -830,21 +641,15 @@ def classify_axial_slice(crop_rgb, base_lab=None):
 
 
 def train_and_benchmark_models(X_train_pca, y_train, X_val_pca, y_val):
-    """
-    Trains and benchmarks 3 distinct machine learning models on the PCA feature subspace:
-      1. k-Nearest Neighbors (k=5)
-      2. Support Vector Machine (SVM with RBF kernel, balanced weights)
-      3. Random Forest Classifier (50 trees, max_depth=6, balanced weights)
-    Returns:
-      model_dict: Trained model instances
-      metrics_summary: Comparison dictionary with Accuracy, Precision, Recall, F1
-      best_model_name: Top performing model based on F1-score
-    """
+    """Trains k-NN, RBF-SVM, and Random Forest on PCA features for both binary and multi-class tasks."""
     models = {
         "k-NN (k=5)": KNeighborsClassifier(n_neighbors=min(5, max(1, len(X_train_pca) // 2))),
         "SVM (RBF)": SVC(kernel="rbf", C=1.0, class_weight="balanced", probability=True),
         "Random Forest": RandomForestClassifier(n_estimators=50, max_depth=6, class_weight="balanced", random_state=42)
     }
+
+    unique_train = np.unique(y_train)
+    avg_mode = "binary" if len(unique_train) == 2 and set(unique_train).issubset({0, 1}) else "macro"
 
     metrics_summary = {}
     best_f1 = -1.0
@@ -853,14 +658,16 @@ def train_and_benchmark_models(X_train_pca, y_train, X_val_pca, y_val):
     for name, model in models.items():
         try:
             model.fit(X_train_pca, y_train)
-            if X_val_pca is not None and len(X_val_pca) > 0 and len(np.unique(y_val)) > 1:
+            if X_val_pca is not None and len(X_val_pca) > 0 and y_val is not None and len(y_val) > 0:
                 preds = model.predict(X_val_pca)
                 acc = accuracy_score(y_val, preds)
-                p, r, f1, _ = precision_recall_fscore_support(y_val, preds, average="binary", zero_division=0)
+                p, r, f1, _ = precision_recall_fscore_support(y_val, preds, average=avg_mode, zero_division=0)
             else:
-                acc, p, r, f1 = 1.0, 1.0, 1.0, 1.0
+                preds = model.predict(X_train_pca)
+                acc = accuracy_score(y_train, preds)
+                p, r, f1, _ = precision_recall_fscore_support(y_train, preds, average=avg_mode, zero_division=0)
 
-            metrics_summary[name] = {"Accuracy": acc, "Precision": p, "Recall": r, "F1": f1}
+            metrics_summary[name] = {"Accuracy": float(acc), "Precision": float(p), "Recall": float(r), "F1": float(f1)}
             if f1 > best_f1:
                 best_f1 = f1
                 best_model_name = name
@@ -875,9 +682,7 @@ def train_and_benchmark_models(X_train_pca, y_train, X_val_pca, y_val):
 # ==============================================================================
 
 def harvest_proposals_from_files(files, max_images=6, target_size=(64, 64)):
-    """
-    Harvests candidate crops, masks, and metadata across a list of image files.
-    """
+    """Harvests candidate crops, masks, and metadata across image files."""
     all_crops, all_masks, all_meta = [], [], []
     for f in files[:max_images]:
         try:
@@ -896,10 +701,7 @@ def harvest_proposals_from_files(files, max_images=6, target_size=(64, 64)):
 
 
 def create_proposal_montage(crops, max_show=10, border_px=2):
-    """
-    Creates a clean 2D grid montage of proposal crops with distinct borders
-    for clear, professional diagnostic visualization.
-    """
+    """Creates a 2D grid montage of 64x64 proposal crops."""
     if not crops:
         return None
     n_show = min(len(crops), max_show)
@@ -928,13 +730,10 @@ def create_proposal_montage(crops, max_show=10, border_px=2):
 # ==============================================================================
 
 def run_pipeline(target_dataset="both", custom_image=None):
-    """
-    Executes the unified end-to-end Machine Vision pipeline across Stages 1 to 5.
-    Runs the exact same universal functions without class-specific branching.
-    """
+    """Executes the unified Machine Vision pipeline across Stages 1 to 5."""
     print("=" * 75)
     print("Machine Vision (UFMFRR-15-M) - Unified Pipeline (Stages 1 - 5)")
-    print("Author: Jakub Wrzyszcz")
+    print("Primary Contributor: Jakub Wrzyszcz")
     print("=" * 75)
 
     os.makedirs("output", exist_ok=True)
@@ -956,7 +755,7 @@ def run_pipeline(target_dataset="both", custom_image=None):
             print(f"[ERROR] No image files found for {tag}.")
             continue
 
-        # Split Train / Validation by Image Files First (Prevents Data Leakage)
+        # Image-level Train / Validation Split (Prevents Patch-Level Data Leakage)
         if len(files) >= 4:
             train_files, val_files = train_test_split(files, test_size=0.30, random_state=42)
         else:
@@ -966,17 +765,13 @@ def run_pipeline(target_dataset="both", custom_image=None):
         raw_rgb = load_normalized_image(sample_file)
         print(f"Sample Image: {os.path.basename(sample_file)} (Resolution: {raw_rgb.shape})")
 
-        # ----------------------------------------------------------------------
-        # Stage 1: Universal Preprocessing
-        # ----------------------------------------------------------------------
+        # Stage 1: Preprocessing
         t0 = time.perf_counter()
         clean_rgb, h, s, v, i_chan, l_raw, l_eq = preprocess_image(raw_rgb)
         t_stage1 = (time.perf_counter() - t0) * 1000.0
         print(f"  [Stage 1] Preprocessing complete in {t_stage1:.2f} ms")
 
-        # ----------------------------------------------------------------------
-        # Stage 2: Universal Foreground Segmentation
-        # ----------------------------------------------------------------------
+        # Stage 2: Foreground Segmentation & K-Means Benchmark
         t1 = time.perf_counter()
         mask, seg_info, contours = segment_foreground(clean_rgb)
         t_stage2 = (time.perf_counter() - t1) * 1000.0
@@ -987,17 +782,13 @@ def run_pipeline(target_dataset="both", custom_image=None):
         print(f"  [Stage 2] {seg_info['method'].capitalize()} ({len(contours)} blobs): {t_stage2:.2f} ms | "
               f"K-Means (k=3): {t_km:.2f} ms (Speedup: {t_km/max(t_stage2, 0.001):.1f}x)")
 
-        # ----------------------------------------------------------------------
-        # Stage 3: Universal Shape-Adaptive Proposal Generation
-        # ----------------------------------------------------------------------
+        # Stage 3: Shape-Adaptive Proposal Generation
         t2 = time.perf_counter()
         sample_crops, sample_masks, sample_meta = extract_proposals(clean_rgb, mask)
         t_stage3 = (time.perf_counter() - t2) * 1000.0
         print(f"  [Stage 3] Extracted {len(sample_crops)} normalized 64x64 proposals in {t_stage3:.2f} ms")
 
-        # ----------------------------------------------------------------------
-        # Stage 4: Universal 95D Feature Extraction & Image-Level PCA Fitting
-        # ----------------------------------------------------------------------
+        # Stage 4: 95D Feature Extraction & Train-Only PCA
         print(f"  [Stage 4] Harvesting proposals across {len(train_files[:5])} train images...")
         train_crops, train_masks, train_meta = harvest_proposals_from_files(train_files, max_images=5)
         val_crops, val_masks, val_meta = harvest_proposals_from_files(val_files, max_images=3)
@@ -1006,6 +797,10 @@ def run_pipeline(target_dataset="both", custom_image=None):
             train_crops.extend(sample_crops)
             train_masks.extend(sample_masks)
             train_meta.extend(sample_meta)
+
+        if len(train_crops) == 0:
+            print(f"  [WARN] No proposals extracted for {tag}. Skipping Stages 4-5.")
+            continue
 
         print(f"  [Stage 4] Extracting 95D features (Train: {len(train_crops)}, Val: {len(val_crops)})...")
         X_train = np.array([extract_95d_features(c, m) for c, m in zip(train_crops, train_masks)], dtype=np.float32)
@@ -1017,35 +812,31 @@ def run_pipeline(target_dataset="both", custom_image=None):
         compression = (1.0 - n_pca / 95.0) * 100.0
         print(f"  [Stage 4] PCA: 95D -> {n_pca}D ({compression:.1f}% reduction, {cum_var[-1]*100:.2f}% variance retained)")
 
-        # ----------------------------------------------------------------------
-        # Stage 5: Machine Learning, Non-Maximum Suppression & Object Counting
-        # ----------------------------------------------------------------------
+        # Stage 5: Unified Machine Learning Classification, NMS & Counting Evaluation
         ml_summary = {}
-        top_model_name = "N/A"
+        top_model_name = "Random Forest"
         counting_results = {}
 
         if tag == "apple":
-            # Assign training labels via COCO Ground Truth IoU matching
             y_train = []
             for m in train_meta:
                 fname = m.get("image_file", "")
                 gt_boxes = coco_annotations.get(fname, [])
-                p_box = m.get("bbox", [0, 0, 40, 40])
+                p_box = m.get("bbox", [0, 0, 32, 32])
                 max_iou = max([compute_box_iou(p_box, gb) for gb in gt_boxes]) if gt_boxes else 0.0
                 y_train.append(1 if max_iou >= 0.25 else 0)
             y_train = np.array(y_train, dtype=int)
 
-            y_val = []
+            y_val = None
             if val_meta:
+                y_val_list = []
                 for m in val_meta:
                     fname = m.get("image_file", "")
                     gt_boxes = coco_annotations.get(fname, [])
-                    p_box = m.get("bbox", [0, 0, 40, 40])
+                    p_box = m.get("bbox", [0, 0, 32, 32])
                     max_iou = max([compute_box_iou(p_box, gb) for gb in gt_boxes]) if gt_boxes else 0.0
-                    y_val.append(1 if max_iou >= 0.25 else 0)
-                y_val = np.array(y_val, dtype=int)
-            else:
-                y_val = None
+                    y_val_list.append(1 if max_iou >= 0.25 else 0)
+                y_val = np.array(y_val_list, dtype=int)
 
             print(f"  [Stage 5] Ground-Truth Labels: {sum(y_train)} Apples, {len(y_train)-sum(y_train)} Background")
             models, ml_summary, top_model_name = train_and_benchmark_models(X_train_pca, y_train, X_val_pca, y_val)
@@ -1054,70 +845,121 @@ def run_pipeline(target_dataset="both", custom_image=None):
                 print(f"    - {m_name:14s}: Acc={met['Accuracy']:.3f}, Prec={met['Precision']:.3f}, "
                       f"Rec={met['Recall']:.3f}, F1={met['F1']:.3f}")
 
-            # Counting Evaluation on Sample Image via 2D NMS
             best_clf = models[top_model_name]
-            sample_feats = np.array([extract_95d_features(c, m) for c, m in zip(sample_crops, sample_masks)], dtype=np.float32)
-            sample_pca = pca.transform(scaler.transform(sample_feats))
-            sample_preds = best_clf.predict(sample_pca)
-            sample_probs = best_clf.predict_proba(sample_pca)[:, 1] if hasattr(best_clf, "predict_proba") else sample_preds.astype(float)
 
-            # Filter positive apple proposals
-            pos_indices = [i for i, p in enumerate(sample_preds) if p == 1]
-            pos_boxes = [sample_meta[i]["bbox"] for i in pos_indices]
-            pos_scores = [sample_probs[i] for i in pos_indices]
+            # Sample Image Counting via 2D NMS
+            pos_boxes, keep_nms = [], []
+            if sample_crops:
+                sample_feats = np.array([extract_95d_features(c, m) for c, m in zip(sample_crops, sample_masks)], dtype=np.float32)
+                sample_pca = pca.transform(scaler.transform(sample_feats))
+                sample_preds = best_clf.predict(sample_pca)
+                if hasattr(best_clf, "predict_proba") and best_clf.predict_proba(sample_pca).shape[1] > 1:
+                    sample_probs = best_clf.predict_proba(sample_pca)[:, 1]
+                else:
+                    sample_probs = sample_preds.astype(float)
 
-            # 2D NMS to suppress overlapping duplicates
-            keep_nms = apply_2d_nms(pos_boxes, pos_scores, iou_thresh=0.35)
+                pos_indices = [i for i, p in enumerate(sample_preds) if p == 1]
+                pos_boxes = [sample_meta[i]["bbox"] for i in pos_indices]
+                pos_scores = [sample_probs[i] for i in pos_indices]
+                keep_nms = apply_2d_nms(pos_boxes, pos_scores, iou_thresh=0.35)
+
             pred_apple_count = len(keep_nms)
             gt_apple_count = len(coco_annotations.get(os.path.basename(sample_file), []))
             err = abs(pred_apple_count - gt_apple_count)
+
+            # Multi-Image Validation Set MAE and RMSE Evaluation
+            y_true_counts, y_pred_counts = [], []
+            for vf in val_files[:5]:
+                v_rgb, _, _, _, _, _, _ = preprocess_image(load_normalized_image(vf))
+                v_mask, _, _ = segment_foreground(v_rgb)
+                v_crops, v_masks, v_meta = extract_proposals(v_rgb, v_mask)
+                if v_crops:
+                    v_feats = np.array([extract_95d_features(c, m) for c, m in zip(v_crops, v_masks)], dtype=np.float32)
+                    v_pca = pca.transform(scaler.transform(v_feats))
+                    v_preds = best_clf.predict(v_pca)
+                    if hasattr(best_clf, "predict_proba") and best_clf.predict_proba(v_pca).shape[1] > 1:
+                        v_probs = best_clf.predict_proba(v_pca)[:, 1]
+                    else:
+                        v_probs = v_preds.astype(float)
+                    v_pos = [i for i, p in enumerate(v_preds) if p == 1]
+                    v_keep = apply_2d_nms([v_meta[i]["bbox"] for i in v_pos], [v_probs[i] for i in v_pos], iou_thresh=0.35)
+                    pred_c = len(v_keep)
+                else:
+                    pred_c = 0
+                gt_c = len(coco_annotations.get(os.path.basename(vf), []))
+                y_true_counts.append(gt_c)
+                y_pred_counts.append(pred_c)
+
+            mae = float(mean_absolute_error(y_true_counts, y_pred_counts)) if y_true_counts else float(err)
+            rmse = float(np.sqrt(mean_squared_error(y_true_counts, y_pred_counts))) if y_true_counts else float(err)
 
             counting_results = {
                 "Predicted Count": pred_apple_count,
                 "Ground Truth Count": gt_apple_count,
                 "Error": err,
+                "MAE": mae,
+                "RMSE": rmse,
                 "Best Model": top_model_name
             }
-            print(f"  [Stage 5] Apple Counting: Predicted={pred_apple_count} vs Ground Truth={gt_apple_count} (Abs Error: {err})")
+            print(f"  [Stage 5] Sample Image Count: Pred={pred_apple_count} vs GT={gt_apple_count} (Abs Error: {err})")
+            print(f"  [Stage 5] Validation Set Counting ({len(y_true_counts)} images): MAE={mae:.2f}, RMSE={rmse:.2f}")
 
         else:
-            # Resistor Scenario: EIA Colour Band Classification, 1D NMS, and Resistance Decoding
-            print("  [Stage 5] Resistor Colour Band Decoding & 1D NMS...")
+            # Resistor Scenario: Train ML Classifiers on 95D PCA Features + 1D NMS Decoding
+            y_train = np.array([
+                classify_axial_slice(c, base_lab=m.get("base_lab"))[0]
+                for c, m in zip(train_crops, train_meta)
+            ])
+            y_val = np.array([
+                classify_axial_slice(c, base_lab=m.get("base_lab"))[0]
+                for c, m in zip(val_crops, val_meta)
+            ]) if val_crops else None
+
+            models, ml_summary, top_model_name = train_and_benchmark_models(X_train_pca, y_train, X_val_pca, y_val)
+            best_clf = models[top_model_name]
+
+            print(f"  [Stage 5] Multi-Class Resistor Band ML Benchmark (Classes: {len(np.unique(y_train))}):")
+            for m_name, met in ml_summary.items():
+                print(f"    - {m_name:14s}: Acc={met['Accuracy']:.3f}, Macro-Prec={met['Precision']:.3f}, "
+                      f"Macro-Rec={met['Recall']:.3f}, Macro-F1={met['F1']:.3f}")
+
             resistor_ids = sorted(list(set(m["resistor_id"] for m in sample_meta if "resistor_id" in m)))
             resistor_reports = []
 
             for r_id in resistor_ids:
-                r_slices_meta = [m for m in sample_meta if m.get("resistor_id") == r_id]
-                r_slice_crops = [sample_crops[i] for i, m in enumerate(sample_meta) if m.get("resistor_id") == r_id]
+                r_indices = [i for i, m in enumerate(sample_meta) if m.get("resistor_id") == r_id]
+                r_slices_meta = [sample_meta[i] for i in r_indices]
+                r_slice_crops = [sample_crops[i] for i in r_indices]
+                r_slice_masks = [sample_masks[i] for i in r_indices]
 
-                # Estimate baseline ceramic color from ends
-                if r_slice_crops:
-                    base_lab = np.median(cv2.cvtColor(r_slice_crops[0], cv2.COLOR_RGB2LAB).reshape(-1, 3), axis=0)
+                if not r_slice_crops:
+                    continue
+
+                # Predict slice classes using the trained ML classifier on PCA features
+                r_feats = np.array([extract_95d_features(c, m) for c, m in zip(r_slice_crops, r_slice_masks)], dtype=np.float32)
+                r_pca = pca.transform(scaler.transform(r_feats))
+                ml_preds = list(best_clf.predict(r_pca))
+                if hasattr(best_clf, "predict_proba"):
+                    ml_confs = list(np.max(best_clf.predict_proba(r_pca), axis=1))
                 else:
-                    base_lab = None
+                    ml_confs = [1.0] * len(ml_preds)
 
-                preds, confs = [], []
-                for sc in r_slice_crops:
-                    lbl, conf = classify_axial_slice(sc, base_lab=base_lab)
-                    preds.append(lbl)
-                    confs.append(conf)
-
-                # 1D Non-Maximum Suppression to group consecutive slices into discrete bands
-                detected_bands = apply_1d_nms(r_slices_meta, preds, confs, bare_class="Bare_Body")
-                band_names = [b[0] for b in detected_bands]
-                resistance_str, tolerance_str, counts_dict = decode_resistor_bands(band_names)
+                detected_bands = apply_1d_nms(r_slices_meta, ml_preds, ml_confs, bare_class="Bare_Body")
+                band_names = [str(b[0]) for b in detected_bands]
+                valid_bands, counts_dict = count_resistor_bands(band_names)
 
                 report = {
                     "Resistor ID": r_id,
-                    "Bands": band_names,
-                    "Resistance": resistance_str,
-                    "Tolerance": tolerance_str,
+                    "BBox": r_slices_meta[0].get("bbox", [0, 0, 50, 50]),
+                    "Bands": valid_bands,
                     "Band Counts": counts_dict,
                 }
                 resistor_reports.append(report)
-                print(f"    Resistor #{r_id}: Bands={band_names} -> {resistance_str} ({tolerance_str}) | Counts={counts_dict}")
+                color_summary = ", ".join(f"{cnt} {col}" for col, cnt in counts_dict.items() if col != "Total Bands")
+                print(f"    Resistor #{r_id} ({top_model_name}): Bands={valid_bands} -> "
+                      f"Total: {counts_dict['Total Bands']} bands ({color_summary}) | Counts={counts_dict}")
 
-            counting_results = {"Resistor Reports": resistor_reports}
+            counting_results = {"Resistor Reports": resistor_reports, "Best Model": top_model_name}
 
         # ----------------------------------------------------------------------
         # Comprehensive 6-Panel Diagnostic Figure (Stages 1 to 5)
@@ -1126,7 +968,7 @@ def run_pipeline(target_dataset="both", custom_image=None):
 
         # (a) Stage 1 Preprocessed Image
         axes[0, 0].imshow(clean_rgb)
-        axes[0, 0].set_title(f"(a) Stage 1: Preprocessed Image (CLAHE + Spatial Filter)")
+        axes[0, 0].set_title("(a) Stage 1: Preprocessed Image (CLAHE + Spatial Filter)")
         axes[0, 0].axis("off")
 
         # (b) Stage 2 Binary Foreground Mask
@@ -1154,8 +996,8 @@ def run_pipeline(target_dataset="both", custom_image=None):
         axes[1, 0].grid(True, alpha=0.3)
         axes[1, 0].legend()
 
-        # (e) Stage 5 Machine Learning Benchmark
-        if tag == "apple" and ml_summary:
+        # (e) Stage 5 Machine Learning Benchmark (Both Domains)
+        if ml_summary:
             m_names = list(ml_summary.keys())
             f1s = [ml_summary[m]["F1"] for m in m_names]
             accs = [ml_summary[m]["Accuracy"] for m in m_names]
@@ -1165,38 +1007,35 @@ def run_pipeline(target_dataset="both", custom_image=None):
             axes[1, 1].set_xticks(x_ind)
             axes[1, 1].set_xticklabels(m_names, rotation=15)
             axes[1, 1].set_ylim(0, 1.1)
-            axes[1, 1].set_title(f"(e) Stage 5: ML Models Comparison (Top: {top_model_name})")
+            axes[1, 1].set_title(f"(e) Stage 5: ML Benchmark (Top: {top_model_name})")
             axes[1, 1].grid(True, alpha=0.3)
             axes[1, 1].legend()
-        else:
-            # Resistor band slice profile
-            axes[1, 1].axis("off")
-            axes[1, 1].text(0.1, 0.7, "Stage 5: EIA 1D-NMS Colour Decoding", fontsize=12, fontweight="bold")
-            if "Resistor Reports" in counting_results:
-                y_pos = 0.55
-                for rep in counting_results["Resistor Reports"][:3]:
-                    bands_str = " - ".join(rep["Bands"]) if rep["Bands"] else "Scanning..."
-                    axes[1, 1].text(0.1, y_pos, f"R#{rep['Resistor ID']}: {bands_str}\n-> {rep['Resistance']} ({rep['Tolerance']})", fontsize=10)
-                    y_pos -= 0.18
-            axes[1, 1].set_title("(e) Stage 5: Resistor Band Sequence & Decoding")
 
-        # (f) Final Counting Result Overlay / Summary
+        # (f) Final Counting Result Overlay
         axes[1, 2].imshow(clean_rgb)
         if tag == "apple":
-            axes[1, 2].set_title(f"(f) Stage 5 Count: Pred={counting_results.get('Predicted Count', 0)} | GT={counting_results.get('Ground Truth Count', 0)}")
-            # Draw remaining proposals after NMS
-            if 'pos_boxes' in locals() and 'keep_nms' in locals():
-                for k in keep_nms:
-                    bx = pos_boxes[k]
-                    rect = plt.Rectangle((bx[0], bx[1]), bx[2], bx[3], fill=False, edgecolor="lime", linewidth=2)
-                    axes[1, 2].add_patch(rect)
+            axes[1, 2].set_title(
+                f"(f) Stage 5 Count: Pred={counting_results.get('Predicted Count', 0)} | "
+                f"GT={counting_results.get('Ground Truth Count', 0)} (MAE={counting_results.get('MAE', 0):.2f})"
+            )
+            for k in keep_nms:
+                bx = pos_boxes[k]
+                rect = plt.Rectangle((bx[0], bx[1]), bx[2], bx[3], fill=False, edgecolor="lime", linewidth=2)
+                axes[1, 2].add_patch(rect)
         else:
-            axes[1, 2].set_title(f"(f) Stage 5: Multi-Resistor Detections ({len(resistor_ids)} Resistors)")
-            for m in sample_meta:
-                if "bbox" in m:
-                    bx = m["bbox"]
-                    rect = plt.Rectangle((bx[0], bx[1]), bx[2], bx[3], fill=False, edgecolor="cyan", linewidth=2)
-                    axes[1, 2].add_patch(rect)
+            reps = counting_results.get("Resistor Reports", [])
+            axes[1, 2].set_title(f"(f) Stage 5: Colour Band Counting ({len(reps)} Resistors)")
+            for rep in reps:
+                bx = rep["BBox"]
+                rect = plt.Rectangle((bx[0], bx[1]), bx[2], bx[3], fill=False, edgecolor="cyan", linewidth=2)
+                axes[1, 2].add_patch(rect)
+                tot = rep["Band Counts"]["Total Bands"]
+                label_txt = f"R#{rep['Resistor ID']}: {tot} bands"
+                axes[1, 2].text(
+                    bx[0], max(15, bx[1] - 6), label_txt,
+                    color="yellow", fontsize=9, fontweight="bold",
+                    bbox=dict(facecolor="black", alpha=0.6, pad=2)
+                )
         axes[1, 2].axis("off")
 
         plt.tight_layout()
