@@ -740,16 +740,27 @@ def run_pipeline(target_dataset="both", custom_image=None):
     coco_annotations = load_coco_annotations()
 
     if custom_image:
-        targets = [("custom", [custom_image])]
+        if target_dataset in ["apple", "resistor"]:
+            domain = target_dataset
+        else:
+            raw_temp = load_normalized_image(custom_image)
+            lab_temp = cv2.cvtColor(raw_temp, cv2.COLOR_RGB2LAB)
+            border_L = float(np.median(np.concatenate([
+                lab_temp[0, :, 0], lab_temp[-1, :, 0], lab_temp[:, 0, 0], lab_temp[:, -1, 0]
+            ])))
+            domain = "resistor" if border_L > 150.0 else "apple"
+
+        bg_files = resolve_dataset_files(domain)
+        targets = [(domain, bg_files, custom_image)]
     elif target_dataset == "both":
         targets = [
-            ("apple", resolve_dataset_files("apple")),
-            ("resistor", resolve_dataset_files("resistor")),
+            ("apple", resolve_dataset_files("apple"), None),
+            ("resistor", resolve_dataset_files("resistor"), None),
         ]
     else:
-        targets = [(target_dataset, resolve_dataset_files(target_dataset))]
+        targets = [(target_dataset, resolve_dataset_files(target_dataset), None)]
 
-    for tag, files in targets:
+    for tag, files, test_override in targets:
         print(f"\n{'='*30} DOMAIN: {tag.upper()} {'='*30}")
         if not files:
             print(f"[ERROR] No image files found for {tag}.")
@@ -761,7 +772,7 @@ def run_pipeline(target_dataset="both", custom_image=None):
         else:
             train_files, val_files = files, files
 
-        sample_file = val_files[0] if val_files else train_files[0]
+        sample_file = test_override if test_override else (val_files[0] if val_files else train_files[0])
         raw_rgb = load_normalized_image(sample_file)
         print(f"Sample Image: {os.path.basename(sample_file)} (Resolution: {raw_rgb.shape})")
 
@@ -1039,7 +1050,8 @@ def run_pipeline(target_dataset="both", custom_image=None):
         axes[1, 2].axis("off")
 
         plt.tight_layout()
-        out_fig = os.path.join("output", f"pipeline_{tag}_summary.png")
+        out_name = "pipeline_custom_summary.png" if test_override else f"pipeline_{tag}_summary.png"
+        out_fig = os.path.join("output", out_name)
         plt.savefig(out_fig, dpi=200, bbox_inches="tight")
 
         try:
