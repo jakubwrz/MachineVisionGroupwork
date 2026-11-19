@@ -12,6 +12,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
+# ==============================================================================
+# CONFIGURATION TOGGLE
+# ==============================================================================
+# False -> saves unenhanced crops to output/resistor_crops_raw/ (annotate these + baseline run)
+# True  -> saves CLAHE/sharpened crops to output/resistor_crops_enhanced/ (enhanced ablation run)
+ENHANCE_ON = False
+
+
 def list_images(folder):
     """Returns a sorted list of all JPG/JPEG/PNG image paths in a folder."""
     exts = ("*.jpg", "*.jpeg", "*.png", "*.JPG", "*.JPEG", "*.PNG")
@@ -94,10 +102,12 @@ def enhance_resistor_crop(bgr_crop):
     return sharp_bgr
 
 
-def extract_resistor_bodies(bgr_img, enhance=True):
+def extract_resistor_bodies(bgr_img, enhance=ENHANCE_ON, raw_bgr=None):
     """
     Isolates each resistor's ceramic body, removes wire leads via Morphological Opening,
-    rotates each body horizontally, and enhances band contrast for YOLO.
+    rotates each body horizontally, and optionally enhances band contrast for YOLO.
+    If enhance=False and raw_bgr is provided, crops are sliced from raw_bgr using the
+    exact same mask/angle so pixel coordinates remain identical across both runs.
     """
     h_img, w_img = bgr_img.shape[:2]
     lab = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2LAB)
@@ -161,6 +171,7 @@ def extract_resistor_bodies(bgr_img, enhance=True):
 
     # 4. Reject disconnected thin wire stubs (< 50% of the thickest ceramic body in the frame)
     max_thick = max(item[3] for item in candidates)
+    src_for_crop = raw_bgr if (not enhance and raw_bgr is not None) else bgr_img
     crops, bboxes = [], []
 
     for bc, rect, body_len, body_thick, long_vec in candidates:
@@ -172,7 +183,7 @@ def extract_resistor_bodies(bgr_img, enhance=True):
 
         cx, cy = rect[0]
         M_rot = cv2.getRotationMatrix2D((cx, cy), angle, 1.0)
-        rot_bgr = cv2.warpAffine(bgr_img, M_rot, (w_img, h_img), borderMode=cv2.BORDER_REPLICATE)
+        rot_bgr = cv2.warpAffine(src_for_crop, M_rot, (w_img, h_img), borderMode=cv2.BORDER_REPLICATE)
 
         x1, x2 = int(max(0, cx - body_len * 0.58)), int(min(w_img, cx + body_len * 0.58))
         y1, y2 = int(max(0, cy - body_thick * 0.75)), int(min(h_img, cy + body_thick * 0.75))
@@ -185,6 +196,7 @@ def extract_resistor_bodies(bgr_img, enhance=True):
             cv2.drawContours(body_mask, [bc], -1, 255, thickness=cv2.FILLED)
 
     return crops, bboxes, body_mask
+
 
 # ==============================================================================
 # STAGE 3: UNIFIED YOLO OUTPUT COUNTER (APPLES & RESISTOR BANDS)
@@ -252,14 +264,18 @@ def batch_process_apples(src_dir="minneapple-1-1/train", dst_dir="output/process
 def batch_process_resistors(
     src_dir="Resistor Dataset",
     processed_dir="output/processed_resistors",
-    crops_dir="output/resistor_crops",
+    crops_dir=None,
     debug_dir="output/debug_resistors",
+    enhance=ENHANCE_ON,
     save_debug=True,
 ):
     """
-    Preprocesses all multi-resistor photos, saves full processed images, extracts and enhances
-    every resistor body crop with unique filenames, and optionally saves 3-panel debug figures.
+    Preprocesses all multi-resistor photos, saves full processed images, extracts every
+    resistor body crop (raw or enhanced depending on ENHANCE_ON), and optionally saves debug figures.
     """
+    if crops_dir is None:
+        crops_dir = "output/resistor_crops_enhanced" if enhance else "output/resistor_crops_raw"
+
     clear_folder(processed_dir)
     clear_folder(crops_dir)
     if save_debug:
@@ -276,7 +292,7 @@ def batch_process_resistors(
         clean = preprocess_image(raw, mode="resistor")
         cv2.imwrite(os.path.join(processed_dir, fname), clean)
 
-        crops, bboxes, mask = extract_resistor_bodies(clean, enhance=True)
+        crops, bboxes, mask = extract_resistor_bodies(clean, enhance=enhance, raw_bgr=raw)
         for i, crop in enumerate(crops):
             cv2.imwrite(os.path.join(crops_dir, f"{stem}_r{i:02d}.png"), crop)
             total_crops += 1
@@ -284,8 +300,9 @@ def batch_process_resistors(
         if save_debug:
             save_resistor_debug_figure(clean, mask, bboxes, os.path.join(debug_dir, f"debug_{stem}.png"))
 
+    mode_label = "enhanced" if enhance else "raw"
     print(f"[Resistors] Saved {len(img_paths)} preprocessed images -> {processed_dir}/")
-    print(f"[Resistors] Exported {total_crops} enhanced horizontal crops -> {crops_dir}/")
+    print(f"[Resistors] Exported {total_crops} {mode_label} horizontal crops -> {crops_dir}/")
     if save_debug:
         print(f"[Resistors] Saved {len(img_paths)} debug overlays -> {debug_dir}/")
     return len(img_paths), total_crops
@@ -299,7 +316,7 @@ if __name__ == "__main__":
     batch_process_resistors(
         src_dir="Resistor Dataset",
         processed_dir="output/processed_resistors",
-        crops_dir="output/resistor_crops",
         debug_dir="output/debug_resistors",
+        enhance=ENHANCE_ON,
         save_debug=True,
     )
