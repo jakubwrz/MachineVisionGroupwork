@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+data/
+runs/
+*.pt
+last_training.json
